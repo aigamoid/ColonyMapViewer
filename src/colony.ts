@@ -126,7 +126,7 @@ export function applyColony(
           `#include <dithering_fragment>\n  {\n    float f = smoothstep(22.0, 70.0, vCarDist);\n    if (f <= 0.001) discard;\n    gl_FragColor.a *= f;\n  }`,
         );
       material.transparent = true;
-      material.depthWrite = true;
+      material.depthWrite = false; // 半透明の手前ビルが背後のルート等を隠さないように
     }
   };
   material.needsUpdate = true;

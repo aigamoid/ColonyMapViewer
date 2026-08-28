@@ -5,7 +5,6 @@ import {
   createColonyUniforms,
   setForward,
   applyColony,
-  colonyWarpCPU,
 } from "./colony";
 import { loadRegion } from "./vectorTiles";
 import { loadTerrain } from "./terrain";
@@ -93,7 +92,7 @@ let camDist = 16;
 let dragYaw = 0;
 let dragPitch = 0;
 
-let destPin: THREE.Group | null = null;
+let destPin: THREE.Object3D | null = null;
 let destLngLat: LngLat | null = null;
 let routeLine: THREE.Object3D | null = null;
 let currentRoute: Route | null = null;
@@ -126,14 +125,22 @@ function addColonyGrid(): void {
   scene.add(new THREE.LineSegments(geo, mat));
 }
 
-function makePin(): THREE.Group {
+/** 目的地ピン: ローカル絶対座標でジオメトリを組み、コロニー変形を適用して曲面に沿わせる */
+function makePin(dx: number, dz: number): THREE.Object3D {
+  const e = elevSample(dx, dz);
   const grp = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color: 0x1f6feb, roughness: 0.4 });
-  const head = new THREE.Mesh(new THREE.SphereGeometry(9, 16, 16), mat);
-  head.position.y = 34;
-  const stem = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 34, 8), mat);
-  stem.position.y = 17;
-  grp.add(head, stem);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x2ea3ff,
+    emissive: 0x1f6feb,
+    emissiveIntensity: 0.7,
+    roughness: 0.4,
+  });
+  applyColony(mat, colony);
+  const stemGeo = new THREE.CylinderGeometry(1.2, 1.2, 22, 8);
+  stemGeo.translate(dx, e + 11, dz);
+  const headGeo = new THREE.SphereGeometry(6, 16, 16);
+  headGeo.translate(dx, e + 26, dz);
+  grp.add(new THREE.Mesh(stemGeo, mat), new THREE.Mesh(headGeo, mat));
   grp.name = "destPin";
   return grp;
 }
@@ -247,9 +254,14 @@ async function loadWorld(): Promise<void> {
 
 async function setDestination(ll: LngLat, label: string): Promise<void> {
   destLngLat = ll;
+  const d = frame.toLocal(ll);
   if (destPin) scene.remove(destPin);
-  destPin = makePin();
+  destPin = makePin(d.x, d.z);
   scene.add(destPin);
+
+  // 目的地方向へルートが見えるよう「目的地アップ」に切替
+  viewMode = "destination";
+  ui.setViewMode("destination");
 
   ui.toast(`ルート探索中… (${label})`);
   const r = await osrmRoute(car.lngLat, ll);
@@ -267,7 +279,7 @@ async function setDestination(ll: LngLat, label: string): Promise<void> {
 function drawRouteLine(): void {
   if (routeLine) scene.remove(routeLine);
   // 幅を持つリボンとして構築 (LineBasicMaterial は線幅 1px 固定で見えないため)
-  const half = 5;
+  const half = 7;
   const pos: number[] = [];
   const idx: number[] = [];
   for (let i = 0; i < routeLocal.length - 1; i++) {
@@ -278,8 +290,8 @@ function drawRouteLine(): void {
     const len = Math.hypot(dx, dz) || 1;
     const nx = (-dz / len) * half;
     const nz = (dx / len) * half;
-    const ya = elevSample(a.x, a.z) + 2.2;
-    const yb = elevSample(b.x, b.z) + 2.2;
+    const ya = elevSample(a.x, a.z) + 3.5;
+    const yb = elevSample(b.x, b.z) + 3.5;
     const base = pos.length / 3;
     pos.push(
       a.x + nx, ya, a.z + nz,
@@ -294,11 +306,12 @@ function drawRouteLine(): void {
   geo.setIndex(idx);
   geo.computeVertexNormals();
   const mat = new THREE.MeshStandardMaterial({
-    color: 0x2ea3ff,
-    emissive: 0x1f6feb,
-    emissiveIntensity: 0.6,
+    color: 0x33aaff,
+    emissive: 0x2ea3ff,
+    emissiveIntensity: 1.1,
     roughness: 0.5,
     side: THREE.DoubleSide,
+    depthTest: false,
     polygonOffset: true,
     polygonOffsetFactor: -8,
     polygonOffsetUnits: -8,
@@ -306,7 +319,7 @@ function drawRouteLine(): void {
   applyColony(mat, colony);
   routeLine = new THREE.Mesh(geo, mat);
   routeLine.name = "route";
-  routeLine.renderOrder = 5;
+  routeLine.renderOrder = 999;
   scene.add(routeLine);
 }
 
@@ -468,10 +481,7 @@ function tick(): void {
   const [he, hn] = car.headingVec();
   carMesh.rotation.y = Math.atan2(he, hn);
 
-  if (destPin && destLngLat) {
-    const d = frame.toLocal(destLngLat);
-    destPin.position.copy(colonyWarpCPU(d.x, elevSample(d.x, d.z), d.z, colony));
-  }
+  // destPin はコロニー変形シェーダ付きの静的ジオメトリ (毎フレーム更新不要)
 
   // カメラ: 自車のやや後方・上空から、ほぼ水平に前方を見る。
   // コロニーの壁がせり上がって上半分を埋める。
