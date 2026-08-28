@@ -1,0 +1,262 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0e14;
+  --surface: #171b23;
+  --surface-2: #1f2530;
+  --border: #2b3444;
+  --text: #e6edf3;
+  --muted: #9fb0c3;
+  --accent: #1f6feb;
+  --accent-text: #ffffff;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    "Hiragino Sans", "Noto Sans JP", sans-serif;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+}
+#app {
+  position: fixed;
+  inset: 0;
+}
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+/* --- 上部: 検索 / 案内バナー --- */
+.topbar {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  left: max(12px, env(safe-area-inset-left));
+  right: max(12px, env(safe-area-inset-right));
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.searchbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 10px 16px;
+  box-shadow: 0 6px 20px #0007;
+}
+.searchbar input {
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
+}
+.searchbar .icon {
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.results {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 6px 20px #0007;
+}
+.results button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 12px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.results button:last-child {
+  border-bottom: 0;
+}
+.results button:hover {
+  background: var(--surface-2);
+}
+
+.turn-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: 16px;
+  padding: 14px 18px;
+  box-shadow: 0 6px 20px #0008;
+}
+.turn-banner .arrow {
+  font-size: 34px;
+  line-height: 1;
+}
+.turn-banner .dist {
+  font-size: 22px;
+  font-weight: 700;
+}
+.turn-banner .road {
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+/* --- 右下: FAB 群 --- */
+.fabs {
+  position: fixed;
+  right: max(12px, env(safe-area-inset-right));
+  bottom: calc(max(12px, env(safe-area-inset-bottom)) + 96px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.fab {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 18px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 4px 14px #0006;
+}
+.fab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.fab small {
+  font-size: 9px;
+  line-height: 1;
+}
+
+/* --- 下部: ルートカード / ナビ情報 --- */
+.bottom-card {
+  position: fixed;
+  left: max(12px, env(safe-area-inset-left));
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(12px, env(safe-area-inset-bottom));
+  z-index: 20;
+  max-width: 520px;
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 16px 18px;
+  box-shadow: 0 -4px 24px #0007;
+}
+.bottom-card .row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.bottom-card .eta {
+  font-size: 22px;
+  font-weight: 700;
+}
+.bottom-card .sub {
+  color: var(--muted);
+  font-size: 13px;
+}
+.bottom-card .actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+.btn {
+  flex: 1;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+/* --- 設定パネル --- */
+.settings {
+  position: fixed;
+  left: max(12px, env(safe-area-inset-left));
+  bottom: calc(max(12px, env(safe-area-inset-bottom)) + 96px);
+  z-index: 20;
+  width: 216px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  font-size: 12px;
+  box-shadow: 0 4px 14px #0006;
+}
+.settings.collapsed .settings-body {
+  display: none;
+}
+.settings h4 {
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  cursor: pointer;
+}
+.settings label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+}
+.settings input[type="range"] {
+  width: 104px;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 84px;
+  transform: translateX(-50%);
+  z-index: 30;
+  background: #000c;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+.hidden {
+  display: none !important;
+}

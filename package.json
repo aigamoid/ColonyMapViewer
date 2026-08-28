@@ -1,0 +1,25 @@
+{
+  "name": "colony-map-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "円柱状スペースコロニーのように地図をレンダリングするTPSマップビューア (POC)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@types/earcut": "^3.0.0",
+    "@types/mapbox__vector-tile": "^1.3.4",
+    "@types/three": "^0.185.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  },
+  "dependencies": {
+    "@mapbox/vector-tile": "^2.0.3",
+    "earcut": "^3.0.0",
+    "pbf": "^4.0.1",
+    "three": "^0.170.0"
+  }
+}
