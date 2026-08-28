@@ -443,7 +443,11 @@ interface ColonyDebug {
   readonly regionLoaded: boolean;
   readonly counts: Record<string, number>;
 }
-(window as unknown as { __colony: ColonyDebug }).__colony = {
+// 開発 / E2E 用フック。本番ビルド (?debug=1 指定時のみ) では公開しない。
+const debugEnabled =
+  import.meta.env.DEV ||
+  new URLSearchParams(location.search).get("debug") === "1";
+const colonyDebug: ColonyDebug = {
   car,
   colony,
   scene,
@@ -467,6 +471,9 @@ interface ColonyDebug {
     return c;
   },
 };
+if (debugEnabled) {
+  (window as unknown as { __colony: ColonyDebug }).__colony = colonyDebug;
+}
 
 const clock = new THREE.Clock();
 function tick(): void {

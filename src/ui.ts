@@ -214,9 +214,17 @@ export class UI {
 
   setTurn(icon: string, distText: string, road: string): void {
     this.turnBanner.className = "turn-banner";
-    this.turnBanner.innerHTML = `
-      <span class="arrow">${icon}</span>
-      <div><div class="dist">${distText}</div><div class="road">${road}</div></div>`;
+    // road / distText は OSRM(=OSM) 由来の外部文字列を含むため innerHTML 補間しない
+    this.turnBanner.replaceChildren();
+    const arrow = el("span", "arrow");
+    arrow.textContent = icon;
+    const box = el("div");
+    const dist = el("div", "dist");
+    dist.textContent = distText;
+    const rd = el("div", "road");
+    rd.textContent = road;
+    box.append(dist, rd);
+    this.turnBanner.append(arrow, box);
   }
 
   hideTurn(): void {
