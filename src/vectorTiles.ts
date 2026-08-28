@@ -172,16 +172,18 @@ export async function loadRegion(
     flatShading: true,
   });
   const roadMat = new THREE.MeshStandardMaterial({
-    color: 0x8b93a1,
+    color: 0xc9ced8,
     roughness: 1,
+    side: THREE.DoubleSide,
     polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
+    polygonOffsetFactor: -4,
+    polygonOffsetUnits: -4,
   });
   const waterMat = new THREE.MeshStandardMaterial({
     color: 0x3d86a8,
     roughness: 0.3,
     metalness: 0.1,
+    side: THREE.DoubleSide,
     polygonOffset: true,
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -1,
@@ -423,6 +425,7 @@ function ribbon(
       x2 + nx, e2, z2 + nz,
       x2 - nx, e2, z2 - nz,
     );
-    outIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+    // 上向き (+y) を表とする巻き順
+    outIdx.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
   }
 }

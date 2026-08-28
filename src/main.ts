@@ -95,24 +95,24 @@ let dragPitch = 0;
 
 let destPin: THREE.Group | null = null;
 let destLngLat: LngLat | null = null;
-let routeLine: THREE.Line | null = null;
+let routeLine: THREE.Object3D | null = null;
 let currentRoute: Route | null = null;
 let routeLocal: { x: number; z: number }[] = [];
 let stepIdx = 0;
 let navigating = false;
 
-/** コロニー曲面を可視化する参照グリッド (100m 間隔) */
+/** コロニー曲面を可視化する参照グリッド (200m 間隔・控えめ) */
 function addColonyGrid(): void {
-  const ext = 2500;
-  const step = 100;
+  const ext = 1600;
+  const step = 200;
   const pos: number[] = [];
-  const push = (x: number, z: number) => pos.push(x, elevSample(x, z) + 0.8, z);
+  const push = (x: number, z: number) => pos.push(x, elevSample(x, z) + 0.6, z);
   for (let g = -ext; g <= ext; g += step) {
-    for (let s = -ext; s < ext; s += step / 4) {
+    for (let s = -ext; s < ext; s += 20) {
       push(g, s);
-      push(g, s + step / 4);
+      push(g, s + 20);
       push(s, g);
-      push(s + step / 4, g);
+      push(s + 20, g);
     }
   }
   const geo = new THREE.BufferGeometry();
@@ -120,7 +120,7 @@ function addColonyGrid(): void {
   const mat = new THREE.LineBasicMaterial({
     color: 0x2ea3ff,
     transparent: true,
-    opacity: 0.09,
+    opacity: 0.05,
   });
   applyColony(mat, colony);
   scene.add(new THREE.LineSegments(geo, mat));
@@ -134,6 +134,7 @@ function makePin(): THREE.Group {
   const stem = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 34, 8), mat);
   stem.position.y = 17;
   grp.add(head, stem);
+  grp.name = "destPin";
   return grp;
 }
 
@@ -265,13 +266,47 @@ async function setDestination(ll: LngLat, label: string): Promise<void> {
 
 function drawRouteLine(): void {
   if (routeLine) scene.remove(routeLine);
-  const pts = routeLocal.map(
-    (p) => new THREE.Vector3(p.x, elevSample(p.x, p.z) + 1.5, p.z),
-  );
-  const geo = new THREE.BufferGeometry().setFromPoints(pts);
-  const mat = new THREE.LineBasicMaterial({ color: 0x2ea3ff });
+  // 幅を持つリボンとして構築 (LineBasicMaterial は線幅 1px 固定で見えないため)
+  const half = 5;
+  const pos: number[] = [];
+  const idx: number[] = [];
+  for (let i = 0; i < routeLocal.length - 1; i++) {
+    const a = routeLocal[i];
+    const b = routeLocal[i + 1];
+    const dx = b.x - a.x;
+    const dz = b.z - a.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const nx = (-dz / len) * half;
+    const nz = (dx / len) * half;
+    const ya = elevSample(a.x, a.z) + 2.2;
+    const yb = elevSample(b.x, b.z) + 2.2;
+    const base = pos.length / 3;
+    pos.push(
+      a.x + nx, ya, a.z + nz,
+      a.x - nx, ya, a.z - nz,
+      b.x + nx, yb, b.z + nz,
+      b.x - nx, yb, b.z - nz,
+    );
+    idx.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x2ea3ff,
+    emissive: 0x1f6feb,
+    emissiveIntensity: 0.6,
+    roughness: 0.5,
+    side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: -8,
+    polygonOffsetUnits: -8,
+  });
   applyColony(mat, colony);
-  routeLine = new THREE.Line(geo, mat);
+  routeLine = new THREE.Mesh(geo, mat);
+  routeLine.name = "route";
+  routeLine.renderOrder = 5;
   scene.add(routeLine);
 }
 
@@ -382,6 +417,43 @@ const ui = new UI(app, {
 car.startFreedrive();
 ui.toast("フリードライブ: WASD / 矢印キー・地図タップで目的地");
 loadWorld();
+
+// デバッグ / E2E フック
+interface ColonyDebug {
+  car: Car;
+  colony: ColonyUniforms;
+  scene: THREE.Scene;
+  setDestination: (ll: LngLat, label: string) => Promise<void>;
+  startNav: () => void;
+  geocode: typeof geocode;
+  readonly route: Route | null;
+  readonly regionLoaded: boolean;
+  readonly counts: Record<string, number>;
+}
+(window as unknown as { __colony: ColonyDebug }).__colony = {
+  car,
+  colony,
+  scene,
+  setDestination,
+  startNav,
+  geocode,
+  get route() {
+    return currentRoute;
+  },
+  get regionLoaded() {
+    return !!regionGroup;
+  },
+  get counts() {
+    const c: Record<string, number> = {};
+    scene.traverse((o) => {
+      const g = (o as THREE.Mesh).geometry as THREE.BufferGeometry | undefined;
+      if (g?.attributes?.position) {
+        c[o.name || o.type] = g.attributes.position.count;
+      }
+    });
+    return c;
+  },
+};
 
 const clock = new THREE.Clock();
 function tick(): void {
