@@ -39,6 +39,47 @@ export async function geocode(query: string, near?: LngLat): Promise<GeocodeHit[
   }));
 }
 
+/**
+ * 逆ジオコーディング (現在地の住所)。
+ *
+ * ベクタータイルの place ラベルは「点」なので最近傍を取ると
+ * 隣の区の重心のほうが近い、といったことが起きる (丸の内で「中央区」になる等)。
+ * 正しい行政区画は境界ポリゴンが要るため、ここは Nominatim に問い合わせる。
+ * 利用規約に配慮して呼び出し側で十分に間引くこと。
+ */
+export async function reverseGeocode(ll: LngLat): Promise<string[] | null> {
+  const params = new URLSearchParams({
+    lat: String(ll.lat),
+    lon: String(ll.lng),
+    format: "jsonv2",
+    zoom: "16",
+    "accept-language": "ja",
+  });
+  try {
+    const res = await fetch(`${NOMINATIM}/reverse?${params}`, {
+      headers: { "Accept-Language": "ja" },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { address?: Record<string, string> };
+    const a = data.address;
+    if (!a) return null;
+    const parts = [
+      a["state"] ?? a["province"] ?? a["region"],
+      a["city"] ?? a["town"] ?? a["county"] ?? a["municipality"],
+      a["city_district"] ?? a["suburb"] ?? a["borough"],
+      a["neighbourhood"] ?? a["quarter"],
+    ].filter((v): v is string => !!v);
+    // 重複や包含関係 (例: 東京都 / 東京) を落とす
+    const out: string[] = [];
+    for (const p of parts) {
+      if (!out.some((q) => q === p || q.includes(p) || p.includes(q))) out.push(p);
+    }
+    return out.slice(0, 3);
+  } catch {
+    return null;
+  }
+}
+
 export interface RouteStep {
   /** このステップ開始時点での残距離ではなく、ステップ自体の距離(m) */
   distance: number;

@@ -281,6 +281,11 @@ canvas {
   color: #b9d6f2;
   font-weight: 600;
 }
+.label--road {
+  color: #f0f3f7;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
 .label--poi {
   color: #9fe3bd;
   font-weight: 500;
@@ -296,6 +301,59 @@ canvas {
   border-radius: 50%;
   background: currentColor;
   box-shadow: 0 0 3px #000;
+}
+
+/* --- 左上: 現在地エリア + 速度 --- */
+.status {
+  position: fixed;
+  left: max(12px, env(safe-area-inset-left));
+  top: max(12px, env(safe-area-inset-top));
+  z-index: 20;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  pointer-events: none;
+}
+.status .area {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  box-shadow: 0 4px 14px #0006;
+  max-width: 44vw;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.status .area .sep {
+  color: var(--muted);
+  font-size: 11px;
+}
+.status .speed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 4px 12px;
+  min-width: 62px;
+  box-shadow: 0 4px 14px #0006;
+}
+.status .speed b {
+  font-size: 19px;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+.status .speed span {
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0.08em;
 }
 
 .toast {

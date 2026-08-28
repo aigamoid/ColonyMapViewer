@@ -49,6 +49,9 @@ export class UI {
   private gpsFab: HTMLButtonElement;
   private viewFab: HTMLButtonElement;
   private toastEl: HTMLDivElement;
+  private status: HTMLDivElement;
+  private areaEl: HTMLDivElement;
+  private speedEl: HTMLDivElement;
   private toastTimer = 0;
   private viewMode: ViewModeId = "north";
   private searchTimer = 0;
@@ -104,6 +107,14 @@ export class UI {
         <input type="range" data-k="c" min="5" max="60" step="1" value="16" />
       </div>`;
     root.append(this.settings);
+
+    // --- 左上: 現在地エリア + 速度計 ---
+    this.status = el("div", "status");
+    this.areaEl = el("div", "area");
+    this.speedEl = el("div", "speed");
+    this.speedEl.innerHTML = `<b>0</b><span>km/h</span>`;
+    this.status.append(this.areaEl, this.speedEl);
+    root.append(this.status);
 
     this.toastEl = el("div", "toast hidden");
     root.append(this.toastEl);
@@ -198,6 +209,32 @@ export class UI {
   setViewMode(m: ViewModeId): void {
     this.viewMode = m;
     this.viewFab.innerHTML = `<small>${VIEW_LABEL[m]}</small>`;
+  }
+
+  /** 現在地の住所階層 (例: 東京都 / 千代田区 / 丸の内) */
+  setArea(parts: string[]): void {
+    this.areaEl.replaceChildren();
+    if (!parts.length) {
+      this.areaEl.style.display = "none";
+      return;
+    }
+    this.areaEl.style.display = "";
+    parts.forEach((p, i) => {
+      if (i > 0) {
+        const sep = el("span", "sep");
+        sep.textContent = "›";
+        this.areaEl.append(sep);
+      }
+      const s = document.createElement("span");
+      s.textContent = p;
+      this.areaEl.append(s);
+    });
+  }
+
+  setSpeed(kmh: number): void {
+    const b = this.speedEl.querySelector("b")!;
+    const v = String(Math.round(kmh));
+    if (b.textContent !== v) b.textContent = v;
   }
 
   setGpsActive(on: boolean): void {

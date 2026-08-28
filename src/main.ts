@@ -6,6 +6,7 @@ import {
   setForward,
   applyColony,
   colonyThetaInverse,
+  colonyWarpCPU,
 } from "./colony";
 import { loadRegion } from "./vectorTiles";
 import { loadTerrain } from "./terrain";
@@ -16,6 +17,7 @@ import {
   Route,
   maneuverIcon,
   describeManeuver,
+  reverseGeocode,
 } from "./routing";
 import { UI, ViewModeId, fmtDistance, fmtDuration } from "./ui";
 import type { GeocodeHit } from "./routing";
@@ -244,31 +246,86 @@ function setViewMode(m: ViewModeId): void {
 }
 
 const raycaster = new THREE.Raycaster();
-function pickDestinationFromScreen(sx: number, sy: number): void {
-  if (!regionGroup) return;
-  raycaster.setFromCamera(
-    new THREE.Vector2((sx / innerWidth) * 2 - 1, -(sy / innerHeight) * 2 + 1),
-    camera,
-  );
-  const hits = raycaster.intersectObjects(regionGroup.children, true);
-  if (!hits.length) return;
-  const local = inverseColony(hits[0].point);
-  setDestination(frame.toLngLat(local.x, local.z), "地図で指定した地点");
-}
+const _ndc = new THREE.Vector2();
 
-/** ビュー空間座標 -> ローカル(x,z) 近似逆変換 */
-function inverseColony(p: THREE.Vector3): { x: number; z: number } {
+/**
+ * 画面座標 -> ローカル(x,z)。
+ *
+ * three のレイキャストは使えない: コロニー変形は頂点シェーダで行うため、
+ * CPU 側のジオメトリは「変形前」のままで、見えている位置と当たり判定が一致しない。
+ *
+ * 代わりに解析的に解く。変形後の地面 (標高 0) はビュー空間で
+ *   (forward·R sinθ + axis·t,  R - R cosθ)
+ * すなわち「軸が axis 方向・中心 (0, R, 0)・半径 R の円柱の内面」になる。
+ * カメラからのレイとこの円柱を交差させ、得た θ から前方距離 s を逆算する。
+ */
+/** 画面タップで目的地を指定できる最大距離 (m)。これ以上は角度飽和で精度が出ない。 */
+const PICK_MAX_DIST = 2500;
+
+function screenToLocal(sx: number, sy: number): { x: number; z: number } | null {
+  _ndc.set((sx / innerWidth) * 2 - 1, -(sy / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(_ndc, camera);
+  const o = raycaster.ray.origin;
+  const d = raycaster.ray.direction;
+
   const f = colony.uForward.value;
   const a = colony.uAxis.value;
   const R = colony.uColonyR.value;
-  const relFwd = p.x * f.x + p.z * f.y;
-  const relLat = p.x * a.x + p.z * a.y;
-  const theta = Math.atan2(relFwd, R - p.y);
-  const s = colonyThetaInverse(theta, colony);
-  return {
-    x: car.x + f.x * s + a.x * relLat,
-    z: car.z + f.y * s + a.y * relLat,
-  };
+  const carE = colony.uCarElev.value;
+
+  // 円柱の軸方向 (axis) 成分を除いた 2D 断面で解く。
+  // 断面座標: u = forward 成分, v = 上方向。円柱中心は (0, R)。
+  const ou = o.x * f.x + o.z * f.y;
+  const ov = o.y - R;
+  const du = d.x * f.x + d.z * f.y;
+  const dv = d.y;
+  const A = du * du + dv * dv;
+  if (A < 1e-9) return null;
+  const B = 2 * (ou * du + ov * dv);
+
+  // 標高 h の地面は半径 (R - h) の円柱面に乗る。
+  // h は結果に依存するので、h=0 から始めて数回反復して収束させる
+  // (東京の丸の内でも 2〜3 回で 1m 以下になる)。
+  let hRel = 0;
+  let result: { x: number; z: number } | null = null;
+  for (let iter = 0; iter < 6; iter++) {
+    const radius = R - hRel;
+    const C = ou * ou + ov * ov - radius * radius;
+    const disc = B * B - 4 * A * C;
+    if (disc < 0) return result;
+    const sq = Math.sqrt(disc);
+    // カメラは円柱の内側にいるので前方の交点を採る
+    const t1 = (-B - sq) / (2 * A);
+    const t2 = (-B + sq) / (2 * A);
+    const tHit = t1 > 0.1 ? t1 : t2;
+    if (tHit <= 0.1) return result;
+
+    const theta = Math.atan2(ou + du * tHit, -(ov + dv * tHit));
+    if (Math.abs(theta) > (colony.uThetaMax.value || Math.PI) - 1e-3) return result;
+    const s = colonyThetaInverse(theta, colony);
+    if (!Number.isFinite(s)) return result;
+
+    // axis 方向は変形の影響を受けないのでそのまま使える
+    const hitAxis = (o.x + d.x * tHit) * a.x + (o.z + d.z * tHit) * a.y;
+    const x = car.x + f.x * s + a.x * hitAxis;
+    const z = car.z + f.y * s + a.y * hitAxis;
+    if (Math.hypot(x - car.x, z - car.z) > PICK_MAX_DIST) return null;
+
+    result = { x, z };
+    // 次の反復用に、その地点の実際の標高 (自車基準) を取り込む。
+    // 遠方ではレイが地面を浅い角度で切るため、標高を丸ごと反映すると
+    // 交点が大きく動いて振動する。半分ずつ寄せて収束させる。
+    const next = elevSample(x, z) - carE;
+    if (Math.abs(next - hRel) < 0.5) break;
+    hRel += (next - hRel) * 0.5;
+  }
+  return result;
+}
+
+function pickDestinationFromScreen(sx: number, sy: number): void {
+  const local = screenToLocal(sx, sy);
+  if (!local) return;
+  setDestination(frame.toLngLat(local.x, local.z), "地図で指定した地点");
 }
 
 function disposeTree(obj: THREE.Object3D): void {
@@ -607,7 +664,11 @@ interface ColonyDebug {
   readonly counts: Record<string, number>;
   elevAt: (x: number, z: number) => number;
   readonly labelItems: import("./labels").LabelItem[];
+  readonly renderInfo: { calls: number; triangles: number; meshes: number };
   raycastGround: (x: number, z: number) => number | null;
+  screenToLocal: (sx: number, sy: number) => { x: number; z: number } | null;
+  camera: THREE.PerspectiveCamera;
+  warpToView: (x: number, y: number, z: number) => THREE.Vector3;
 }
 // 開発 / E2E 用フック。本番ビルド (?debug=1 指定時のみ) では公開しない。
 const debugEnabled =
@@ -630,6 +691,21 @@ const colonyDebug: ColonyDebug = {
   get labelItems() {
     return lastLabelItems;
   },
+  get renderInfo() {
+    let meshes = 0;
+    scene.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) meshes++;
+    });
+    return {
+      calls: renderer.info.render.calls,
+      triangles: renderer.info.render.triangles,
+      meshes,
+    };
+  },
+  screenToLocal,
+  camera,
+  warpToView: (x: number, y: number, z: number) =>
+    colonyWarpCPU(x, y, z, colony),
   raycastGround: (x: number, z: number) => {
     // ビュー空間でなくローカル空間の地形三角形へ真下からレイを飛ばし、
     // elevSample() と描画メッシュが一致しているか検証する用
@@ -647,7 +723,9 @@ const colonyDebug: ColonyDebug = {
     scene.traverse((o) => {
       const g = (o as THREE.Mesh).geometry as THREE.BufferGeometry | undefined;
       if (g?.attributes?.position) {
-        c[o.name || o.type] = g.attributes.position.count;
+        const k = o.name || o.type;
+        // 同名メッシュ (タイル分割された建物/道路) は合算する
+        c[k] = (c[k] ?? 0) + g.attributes.position.count;
       }
     });
     return c;
@@ -655,6 +733,61 @@ const colonyDebug: ColonyDebug = {
 };
 if (debugEnabled) {
   (window as unknown as { __colony: ColonyDebug }).__colony = colonyDebug;
+}
+
+/**
+ * 左上の現在地表示。自車に最も近い place ラベルから住所階層を組み立てる。
+ * 3D ラベルだと自分がいる区の名前が画面外に出てしまい読めないため、
+ * HUD に固定で出す。
+ */
+let statusTimer = 0;
+let areaFetchAt = 0;
+let areaFetchFrom: { x: number; z: number } | null = null;
+let areaParts: string[] = [];
+
+/** ラベル点の最近傍から住所を推定する (逆ジオコーディングが使えないときの控え) */
+function guessAreaFromLabels(): string[] {
+  const best: Record<string, { d: number; text: string }> = {};
+  for (const l of lastLabelItems) {
+    if (l.kind === "poi" || l.kind === "road") continue;
+    const d = Math.hypot(l.x - car.x, l.z - car.z);
+    const cur = best[l.kind];
+    if (!cur || d < cur.d) best[l.kind] = { d, text: l.text };
+  }
+  const parts: string[] = [];
+  for (const k of ["city", "ward", "district"] as const) {
+    const b = best[k];
+    const limit = k === "city" ? 30000 : k === "ward" ? 8000 : 1200;
+    if (b && b.d < limit) parts.push(b.text);
+  }
+  return parts;
+}
+
+function updateStatus(): void {
+  ui.setSpeed(Math.abs(car.speed) * 3.6);
+
+  const now = performance.now();
+  if (now - statusTimer < 700) return;
+  statusTimer = now;
+
+  // 逆ジオコーディングは重い & 利用規約もあるので、
+  // 「前回から 200m 以上動いた」かつ「10 秒以上経過」のときだけ問い合わせる。
+  const moved =
+    !areaFetchFrom ||
+    Math.hypot(car.x - areaFetchFrom.x, car.z - areaFetchFrom.z) > 200;
+  if (moved && now - areaFetchAt > 10000) {
+    areaFetchAt = now;
+    areaFetchFrom = { x: car.x, z: car.z };
+    const at = car.lngLat;
+    reverseGeocode(at).then((parts) => {
+      if (parts && parts.length) {
+        areaParts = parts;
+        ui.setArea(areaParts);
+      }
+    });
+  }
+
+  if (!areaParts.length) ui.setArea(guessAreaFromLabels());
 }
 
 const clock = new THREE.Clock();
@@ -694,6 +827,7 @@ function tick(): void {
   );
 
   labels.update(camera, colony);
+  updateStatus();
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }

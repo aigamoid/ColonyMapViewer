@@ -49,6 +49,15 @@ const POI_PRIORITY: Record<string, number> = {
 /** 交通系 POI は駅級のみ (停留所は数が多すぎる) */
 const RAILWAY_SUBCLASS = new Set(["station", "subway", "halt"]);
 
+/** 道路名ラベルを出す道路種別 → 優先度 (小さいほど重要) */
+const ROAD_NAME_PRIORITY: Record<string, number> = {
+  motorway: 0,
+  trunk: 1,
+  primary: 2,
+  secondary: 3,
+  tertiary: 4,
+};
+
 /**
  * place の class + rank → 表示階層。
  *
@@ -125,17 +134,26 @@ export async function loadRegion(
   const scale = mercatorScale(frame.origin.lat);
   const [originMx, originMy] = lngLatToMeters(frame.origin);
 
-  const buildingPos: number[] = [];
-  /** 頂点ごとの「その建物の接地高さ」。遠方の建物を平たくする頂点シェーダで使う。 */
-  const buildingBase: number[] = [];
   const seenBuildings = new Set<string>(); // タイル境界での建物重複を除去
   const roadCenters: number[] = [];
   const labels: LabelItem[] = [];
   const seenLabels = new Set<string>(); // タイル境界で同じ地名が重複する
-  const roadPos: number[] = [];
-  const roadIdx: number[] = [];
-  const waterPos: number[] = [];
-  const waterIdx: number[] = [];
+
+  /**
+   * ジオメトリはタイル単位に分けて別々のメッシュにする。
+   * 全タイルを 1 個の巨大メッシュにまとめると three の視錐台カリングが
+   * まったく効かず、画面外の街まで毎フレーム描画してしまう
+   * (東京では建物だけで 880 万頂点になる)。
+   */
+  interface TileChunk {
+    buildingPos: number[];
+    buildingBase: number[];
+    roadPos: number[];
+    roadIdx: number[];
+    waterPos: number[];
+    waterIdx: number[];
+  }
+  const chunks: TileChunk[] = [];
 
   const jobs: Promise<void>[] = [];
   for (let dx = -ring; dx <= ring; dx++) {
@@ -146,6 +164,17 @@ export async function loadRegion(
         (async () => {
           const tile = await fetchTile(z, tx, ty);
           if (!tile) return;
+
+          const chunk: TileChunk = {
+            buildingPos: [],
+            buildingBase: [],
+            roadPos: [],
+            roadIdx: [],
+            waterPos: [],
+            waterIdx: [],
+          };
+          const { buildingPos, buildingBase, roadPos, roadIdx, waterPos, waterIdx } =
+            chunk;
 
           const nw = tileToLngLat(tx, ty, z);
           const se = tileToLngLat(tx + 1, ty + 1, z);
@@ -219,6 +248,7 @@ export async function loadRegion(
           }
 
           collectLabels(tile, toLocal, labels, seenLabels);
+          chunks.push(chunk);
         })(),
       );
     }
@@ -253,12 +283,21 @@ export async function loadRegion(
     polygonOffsetUnits: -1,
   });
 
-  addMesh(group, "buildings", buildingPos, null, buildingMat, buildingBase);
-  addMesh(group, "roads", roadPos, roadIdx, roadMat);
-  addMesh(group, "water", waterPos, waterIdx, waterMat);
+  // タイルごとに別メッシュ = three が視錐台カリングできる単位になる
+  let bVerts = 0;
+  let rTris = 0;
+  let wTris = 0;
+  for (const c of chunks) {
+    addMesh(group, "buildings", c.buildingPos, null, buildingMat, c.buildingBase);
+    addMesh(group, "roads", c.roadPos, c.roadIdx, roadMat);
+    addMesh(group, "water", c.waterPos, c.waterIdx, waterMat);
+    bVerts += c.buildingPos.length / 3;
+    rTris += c.roadIdx.length / 3;
+    wTris += c.waterIdx.length / 3;
+  }
 
   console.info(
-    `[region] buildings=${buildingPos.length / 9 | 0} roadTris=${roadIdx.length / 3 | 0} waterTris=${waterIdx.length / 3 | 0}`,
+    `[region] chunks=${chunks.length} buildingVerts=${bVerts} roadTris=${rTris} waterTris=${wTris} labels=${labels.length}`,
   );
 
   return {
@@ -315,8 +354,10 @@ function collectLabels(
     const pt = geom[0]?.[0];
     if (!pt) return;
     const [x, z] = toLocal(pt.x, pt.y);
-    // タイル境界をまたぐ重複を除去 (同名・近接)
-    const key = `${text}|${Math.round(x / 50)}|${Math.round(z / 50)}`;
+    // タイル境界をまたぐ重複を除去 (同名・近接)。
+    // 道路名は 1 本の道が細切れに入るので、より広い範囲で 1 個に間引く。
+    const cell = kind === "road" ? 500 : 50;
+    const key = `${text}|${Math.round(x / cell)}|${Math.round(z / cell)}`;
     if (seen.has(key)) return;
     seen.add(key);
     out.push({ x, z, y: 0, text, kind, priority });
@@ -333,6 +374,37 @@ function collectLabels(
       const name = labelName(p);
       if (!name) continue;
       push(f.loadGeometry() as Pt[][], name, kind, rank);
+    }
+  }
+
+  // 道路名: 走行中どの道にいるかはナビの要
+  const tn = tile.layers["transportation_name"];
+  if (tn) {
+    for (let i = 0; i < tn.length; i++) {
+      const f = tn.feature(i);
+      const p = f.properties as Record<string, unknown>;
+      const prio = ROAD_NAME_PRIORITY[p["class"] as string];
+      if (prio === undefined) continue;
+      const name = labelName(p);
+      if (!name || name.length > 20) continue;
+
+      // 最長の線分の中点に置く (端点だと交差点に重なりやすい)
+      let best: Pt[] | null = null;
+      let bestLen = 0;
+      for (const line of f.loadGeometry() as Pt[][]) {
+        if (line.length < 2) continue;
+        const len = Math.hypot(
+          line[line.length - 1].x - line[0].x,
+          line[line.length - 1].y - line[0].y,
+        );
+        if (len > bestLen) {
+          bestLen = len;
+          best = line;
+        }
+      }
+      if (!best) continue;
+      const mid = best[Math.floor(best.length / 2)];
+      push([[mid]], name, "road", 500 + prio);
     }
   }
 

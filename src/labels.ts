@@ -14,7 +14,7 @@ import { ColonyUniforms, colonyWarpCPU } from "./colony";
  */
 
 /** 市区町村 > 区 > 町名 > 施設 の 4 階層。色とサイズで階層を区別する。 */
-export type LabelKind = "city" | "ward" | "district" | "poi";
+export type LabelKind = "city" | "ward" | "district" | "road" | "poi";
 
 export interface LabelItem {
   /** ローカル座標 (m) */
@@ -49,8 +49,10 @@ const KIND: Record<LabelKind, KindStyle> = {
   city: { near: 2500, far: 16000, sizeNear: 20, sizeFar: 27, alphaFar: 0.4, maxCount: 5 },
   ward: { near: 1200, far: 6500, sizeNear: 17, sizeFar: 22, alphaFar: 0.38, maxCount: 9 },
   district: { near: 450, far: 2400, sizeNear: 13.5, sizeFar: 17, alphaFar: 0.32, maxCount: 24 },
+  // 走行中の道路名はナビの要。手前を濃く、少し先まで見せる
+  road: { near: 250, far: 900, sizeNear: 13, sizeFar: 13, alphaFar: 0.3, maxCount: 10 },
   // 建物 / 施設は遠くにあっても役に立たないので早めに打ち切る
-  poi: { near: 160, far: 430, sizeNear: 13, sizeFar: 11.5, alphaFar: 0.35, maxCount: 18 },
+  poi: { near: 160, far: 430, sizeNear: 13, sizeFar: 11.5, alphaFar: 0.35, maxCount: 14 },
 };
 
 export class LabelLayer {
