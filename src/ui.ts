@@ -15,6 +15,7 @@ export interface UICallbacks {
   onRadius: (r: number) => void;
   onThetaMax: (t: number) => void;
   onHeightScale: (h: number) => void;
+  onToggleLabels: (on: boolean) => void;
   onCamDist: (d: number) => void;
 }
 
@@ -92,6 +93,9 @@ export class UI {
         <input type="range" data-k="t" min="10" max="100" step="2" value="66" />
         <label>建物高さ <span data-v="h">1.0×</span></label>
         <input type="range" data-k="h" min="0.5" max="3" step="0.25" value="1" />
+        <label style="cursor:pointer">地名・施設ラベル
+          <input type="checkbox" data-k="labels" checked />
+        </label>
         <label>カメラ距離 <span data-v="c">9 m</span></label>
         <input type="range" data-k="c" min="3" max="30" step="1" value="9" />
       </div>`;
@@ -135,6 +139,13 @@ export class UI {
       h4.querySelector(".toggle")!.textContent =
         this.settings.classList.contains("collapsed") ? "＋" : "−";
     });
+    const labelToggle = this.settings.querySelector<HTMLInputElement>(
+      'input[data-k="labels"]',
+    )!;
+    labelToggle.addEventListener("change", () =>
+      this.cb.onToggleLabels(labelToggle.checked),
+    );
+
     this.settings.querySelectorAll<HTMLInputElement>("input[type=range]").forEach((inp) => {
       inp.addEventListener("input", () => {
         const v = parseFloat(inp.value);

@@ -242,6 +242,30 @@ canvas {
   width: 104px;
 }
 
+/* --- 地名 / 施設ラベル (3D の上に重ねる DOM) --- */
+.labels {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  overflow: hidden;
+}
+.label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  will-change: transform;
+  /* 明暗どちらの地物の上でも読めるよう縁取りする */
+  text-shadow:
+    0 0 3px #000,
+    0 0 6px #000c,
+    1px 1px 0 #0009,
+    -1px -1px 0 #0009;
+}
+
 .toast {
   position: fixed;
   left: 50%;

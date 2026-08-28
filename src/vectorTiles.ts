@@ -3,6 +3,7 @@ import Pbf from "pbf";
 import { VectorTile } from "@mapbox/vector-tile";
 import earcut from "earcut";
 import { LocalFrame, tileToLngLat, lngLatToMeters, mercatorScale } from "./geo";
+import type { LabelItem } from "./labels";
 
 // OpenFreeMap の planet ベクタータイル (OpenMapTiles スキーマ / APIキー不要)
 // 実タイル URL はバージョン付きなので TileJSON から解決する。
@@ -16,7 +17,47 @@ export interface RegionMeshes {
   buildingMat: THREE.Material;
   /** 道路中心線の点列 [x0,z0,x1,z1,...]。自車を道路上へスナップするのに使う。 */
   roadCenters: Float32Array;
+  /** 地名 / 施設ラベル (標高は未設定。呼び出し側で y を入れる) */
+  labels: LabelItem[];
 }
+
+/**
+ * ラベルに採用する POI の class → 優先度。
+ * poi レイヤは 1 タイルに 5000 件あり大半が店舗なので、
+ * ランドマークになりうる種別だけを拾う。
+ */
+const POI_PRIORITY: Record<string, number> = {
+  attraction: 10,
+  monument: 10,
+  museum: 11,
+  castle: 11,
+  railway: 12,
+  aerodrome: 12,
+  university: 13,
+  college: 14,
+  town_hall: 14,
+  hospital: 15,
+  stadium: 15,
+  park: 16,
+  theatre: 17,
+  library: 17,
+  cinema: 18,
+  place_of_worship: 18,
+  golf: 19,
+};
+
+/** 交通系 POI は駅級のみ (停留所は数が多すぎる) */
+const RAILWAY_SUBCLASS = new Set(["station", "subway", "halt"]);
+
+const PLACE_PRIORITY: Record<string, { p: number; kind: "city" | "district" }> = {
+  city: { p: 0, kind: "city" },
+  town: { p: 1, kind: "city" },
+  village: { p: 2, kind: "district" },
+  borough: { p: 3, kind: "district" },
+  suburb: { p: 4, kind: "district" },
+  quarter: { p: 5, kind: "district" },
+  neighbourhood: { p: 6, kind: "district" },
+};
 
 type Pt = { x: number; y: number };
 type ToLocal = (px: number, py: number) => [number, number];
@@ -75,6 +116,8 @@ export async function loadRegion(
   const buildingBase: number[] = [];
   const seenBuildings = new Set<string>(); // タイル境界での建物重複を除去
   const roadCenters: number[] = [];
+  const labels: LabelItem[] = [];
+  const seenLabels = new Set<string>(); // タイル境界で同じ地名が重複する
   const roadPos: number[] = [];
   const roadIdx: number[] = [];
   const waterPos: number[] = [];
@@ -160,6 +203,8 @@ export async function loadRegion(
               }
             }
           }
+
+          collectLabels(tile, toLocal, labels, seenLabels);
         })(),
       );
     }
@@ -207,6 +252,7 @@ export async function loadRegion(
     materials: [buildingMat, roadMat, waterMat],
     buildingMat,
     roadCenters: new Float32Array(roadCenters),
+    labels,
   };
 }
 
@@ -227,6 +273,72 @@ function addMesh(
   const m = new THREE.Mesh(g, mat);
   m.name = name;
   group.add(m);
+}
+
+/** 表示名。UI が日本語なので name:ja があれば優先する。 */
+function labelName(props: Record<string, unknown>): string | null {
+  const ja = props["name:ja"];
+  const base = props["name"];
+  const v = (typeof ja === "string" && ja) || (typeof base === "string" && base);
+  if (!v) return null;
+  // 括弧付きの曖昧さ回避 (例: "中華街 (サンフランシスコ)") は落とす
+  return v.replace(/\s*[（(][^）)]*[）)]\s*$/, "").trim() || null;
+}
+
+/** place / poi レイヤからラベルを取り出す */
+function collectLabels(
+  tile: VectorTile,
+  toLocal: ToLocal,
+  out: LabelItem[],
+  seen: Set<string>,
+): void {
+  const push = (
+    geom: Pt[][],
+    text: string,
+    kind: LabelItem["kind"],
+    priority: number,
+  ): void => {
+    const pt = geom[0]?.[0];
+    if (!pt) return;
+    const [x, z] = toLocal(pt.x, pt.y);
+    // タイル境界をまたぐ重複を除去 (同名・近接)
+    const key = `${text}|${Math.round(x / 50)}|${Math.round(z / 50)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ x, z, y: 0, text, kind, priority });
+  };
+
+  const pl = tile.layers["place"];
+  if (pl) {
+    for (let i = 0; i < pl.length; i++) {
+      const f = pl.feature(i);
+      const p = f.properties as Record<string, unknown>;
+      const spec = PLACE_PRIORITY[p["class"] as string];
+      if (!spec) continue;
+      const name = labelName(p);
+      if (!name) continue;
+      // 同じ class 内の順位も加味 (rank が小さいほど主要)
+      const rank = typeof p["rank"] === "number" ? p["rank"] : 20;
+      push(f.loadGeometry() as Pt[][], name, spec.kind, spec.p * 100 + rank);
+    }
+  }
+
+  const poi = tile.layers["poi"];
+  if (poi) {
+    for (let i = 0; i < poi.length; i++) {
+      const f = poi.feature(i);
+      const p = f.properties as Record<string, unknown>;
+      const cls = p["class"] as string;
+      const base = POI_PRIORITY[cls];
+      if (base === undefined) continue;
+      if (cls === "railway" && !RAILWAY_SUBCLASS.has(p["subclass"] as string)) continue;
+      if (cls === "hospital" && p["subclass"] !== "hospital") continue;
+      const name = labelName(p);
+      if (!name || name.length > 24) continue;
+      const rank = typeof p["rank"] === "number" ? p["rank"] : 9;
+      push(f.loadGeometry() as Pt[][], name, "poi", base * 100 + rank);
+    }
+  }
 }
 
 function roadWidth(cls: string): number {

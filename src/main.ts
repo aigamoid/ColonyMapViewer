@@ -19,10 +19,11 @@ import {
 } from "./routing";
 import { UI, ViewModeId, fmtDistance, fmtDuration } from "./ui";
 import type { GeocodeHit } from "./routing";
+import { LabelLayer } from "./labels";
 
-// 初期位置: サンフランシスコ Market St (碁盤目の街路が正面に伸び、奥に高層ビル群)
-const START: LngLat = { lng: -122.4013, lat: 37.7897 };
-const START_HEADING = (-55 * Math.PI) / 180; // 北西向き = Market St に沿って市街を見る
+// 初期位置: 東京駅 (丸の内側。皇居・銀座・日本橋が周囲に広がる)
+const START: LngLat = { lng: 139.7671, lat: 35.6812 };
+const START_HEADING = (-90 * Math.PI) / 180; // 西向き = 丸の内から皇居方向を見る
 const TILE_Z = 14; // OpenFreeMap planet の最大ズーム
 const TILE_RING = 2;
 const TERRAIN_Z = 13;
@@ -159,21 +160,52 @@ function makePin(dx: number, dz: number): THREE.Object3D {
   return grp;
 }
 
-function updateForward(): void {
-  if (viewMode === "north") {
-    setForward(colony, 0, 1);
-  } else if (viewMode === "heading") {
-    const [e, n] = car.headingVec();
-    setForward(colony, e, n);
-  } else {
-    if (destLngLat) {
-      const d = frame.toLocal(destLngLat);
-      setForward(colony, d.x - car.x, d.z - car.z);
-    } else {
-      const [e, n] = car.headingVec();
-      setForward(colony, e, n);
-    }
-  }
+/**
+ * 「目的地アップ」で進行方向から離れてよい最大角。
+ * 真に目的地を正面に据えると、目的地が真横〜後方にあるとき
+ * 走っている道が視界から外れてナビとして使えないため上限を設ける。
+ */
+const DEST_UP_MAX_DEV = (58 * Math.PI) / 180;
+
+/** 現在の巻き付け方位 (rad, 北=0)。目標へ滑らかに追従させて画面の飛びを防ぐ。 */
+let forwardAngle = 0;
+
+/** a を b との差が ±π に収まるよう正規化 */
+function wrapAngle(a: number): number {
+  return Math.atan2(Math.sin(a), Math.cos(a));
+}
+
+function targetForwardAngle(): number {
+  if (viewMode === "north") return 0;
+
+  const heading = wrapAngle(car.heading);
+  if (viewMode === "heading" || !destLngLat) return heading;
+
+  // 目的地アップ: 進行方向を基準に、目的地方位へ最大 DEST_UP_MAX_DEV まで寄せる
+  const d = frame.toLocal(destLngLat);
+  const dx = d.x - car.x;
+  const dz = d.z - car.z;
+  if (Math.hypot(dx, dz) < 1) return heading;
+  const bearing = Math.atan2(dx, dz);
+  const dev = wrapAngle(bearing - heading);
+  return heading + THREE.MathUtils.clamp(dev, -DEST_UP_MAX_DEV, DEST_UP_MAX_DEV);
+}
+
+function updateForward(dt: number): void {
+  const target = targetForwardAngle();
+  // 最短回りで補間
+  const delta = wrapAngle(target - forwardAngle);
+  forwardAngle = wrapAngle(forwardAngle + delta * Math.min(1, dt * 4));
+  setForward(colony, Math.sin(forwardAngle), Math.cos(forwardAngle));
+}
+
+/** 表示モードを切り替える。ドラッグで回した視点は基準に戻す。 */
+function setViewMode(m: ViewModeId): void {
+  viewMode = m;
+  // これを残すとカメラだけ横を向いたままになり「北を向いていない」ように見える
+  dragYaw = 0;
+  dragPitch = 0;
+  ui.setViewMode(m);
 }
 
 // カメラ操作 & 地図クリック
@@ -183,13 +215,20 @@ function updateForward(): void {
   let ly = 0;
   let downX = 0;
   let downY = 0;
+  // ジェスチャがキャンバス上で始まったかどうか。
+  // これを見ないと、UI ボタンを押した pointerup まで地図クリックとして拾ってしまい
+  // 「終了」を押した直後に目的地が再設定されてナビが終わらない。
+  let downOnCanvas = false;
   renderer.domElement.addEventListener("pointerdown", (e) => {
     dragging = true;
+    downOnCanvas = true;
     lx = downX = e.clientX;
     ly = downY = e.clientY;
   });
   addEventListener("pointerup", (e) => {
     dragging = false;
+    if (!downOnCanvas) return;
+    downOnCanvas = false;
     if (Math.hypot(e.clientX - downX, e.clientY - downY) < 5) {
       pickDestinationFromScreen(e.clientX, e.clientY);
     }
@@ -242,6 +281,7 @@ function disposeTree(obj: THREE.Object3D): void {
 }
 
 function clearWorld(): void {
+  labels.clear();
   for (const o of [regionGroup, terrainMesh, gridMesh]) {
     if (!o) continue;
     scene.remove(o);
@@ -305,6 +345,12 @@ async function loadWorld(origin: LngLat, placeCarAt?: LngLat): Promise<void> {
   regionGroup = region.group;
   scene.add(region.group);
   snapCarToRoad(region.roadCenters);
+
+  // ラベルは地面から少し浮かせる (建物や地形に埋もれないように)
+  for (const l of region.labels) {
+    l.y = elevSample(l.x, l.z) + (l.kind === "poi" ? 22 : 55);
+  }
+  labels.setItems(region.labels);
   ui.toast(terrain.mesh ? "準備完了" : "準備完了 (地形データなし)");
 }
 
@@ -354,8 +400,7 @@ async function setDestination(ll: LngLat, label: string): Promise<void> {
   scene.add(destPin);
 
   // 目的地方向へルートが見えるよう「目的地アップ」に切替
-  viewMode = "destination";
-  ui.setViewMode("destination");
+  setViewMode("destination");
 
   ui.toast(`ルート探索中… (${label})`);
   const r = await osrmRoute(car.lngLat, ll);
@@ -488,6 +533,8 @@ function endNav(): void {
   clearRoute();
 }
 
+const labels = new LabelLayer(app);
+
 const ui = new UI(app, {
   onSearch: (q: string): Promise<GeocodeHit[]> => geocode(q, car.lngLat),
   onPickDestination: (hit) => setDestination(hit.lngLat, hit.label.split(",")[0]),
@@ -510,15 +557,14 @@ const ui = new UI(app, {
       ui.toast("現在地を取得中…");
     }
   },
-  onSetViewMode: (m) => {
-    viewMode = m;
-  },
+  onSetViewMode: (m) => setViewMode(m),
   onRadius: (r) => (colony.uColonyR.value = r),
   onThetaMax: (t) => (colony.uThetaMax.value = t),
   onHeightScale: (h) => {
     heightScale = h;
     ui.toast("建物高さは次回読み込みから反映されます");
   },
+  onToggleLabels: (on) => labels.setVisible(on),
   onCamDist: (d) => (camDist = d),
 });
 
@@ -526,8 +572,7 @@ const ui = new UI(app, {
 car.onGpsFix = (ll) => {
   if (ensureWorldCovers(ll)) {
     ui.toast("現在地に移動しました");
-    viewMode = "heading";
-    ui.setViewMode("heading");
+    setViewMode("heading");
   }
 };
 car.onGpsError = (msg) => {
@@ -537,9 +582,9 @@ car.onGpsError = (msg) => {
 };
 
 car.heading = START_HEADING;
+forwardAngle = START_HEADING;
 car.startFreedrive();
-viewMode = "heading";
-ui.setViewMode("heading");
+setViewMode("heading");
 ui.toast("フリードライブ: WASD / 矢印キー・地図タップで目的地");
 loadWorld(START, START);
 
@@ -604,11 +649,16 @@ if (debugEnabled) {
 
 const clock = new THREE.Clock();
 function tick(): void {
-  const dt = Math.min(0.05, clock.getDelta());
+  const raw = clock.getDelta();
+  // 走行の積分は大きな dt で飛ばないよう強く抑える
+  const dt = Math.min(0.05, raw);
+  // 視点の追従は実時間で行う。物理用の dt を使うと、重い場面 (低 FPS) で
+  // 表示モードを切り替えても向きがいつまでも変わらない。
+  const dtView = Math.min(0.3, raw);
   car.update(dt);
   colony.uCarLocal.value.set(car.x, car.z);
   colony.uCarElev.value = car.elev;
-  updateForward();
+  updateForward(dtView);
   updateNav();
 
   carMesh.position.set(0, 0, 0);
@@ -633,6 +683,7 @@ function tick(): void {
     Math.cos(yaw) * lookDist,
   );
 
+  labels.update(camera, colony);
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }

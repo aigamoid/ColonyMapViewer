@@ -88,7 +88,7 @@ ok("地形メッシュあり", !!counts.terrain, `terrain=${counts.terrain || 0}
 
 // 2. ジオコーディング
 const hits = await cdp.eval(`
-  const h = await window.__colony.geocode("Coit Tower San Francisco");
+  const h = await window.__colony.geocode("東京タワー");
   return h.map(x=>({label:x.label.slice(0,40), ...x.lngLat}));
 `);
 ok("Nominatim ジオコーディング", Array.isArray(hits) && hits.length > 0, `${hits[0]?.label ?? "なし"}`);
@@ -97,7 +97,7 @@ ok("Nominatim ジオコーディング", Array.isArray(hits) && hits.length > 0,
 let routeInfo = null;
 if (hits && hits.length) {
   await cdp.eval(`
-    await window.__colony.setDestination({lng:${hits[0].lng}, lat:${hits[0].lat}}, "Coit Tower");
+    await window.__colony.setDestination({lng:${hits[0].lng}, lat:${hits[0].lat}}, "東京タワー");
   `);
   for (let i = 0; i < 20; i++) {
     routeInfo = await cdp.eval(`
@@ -137,16 +137,79 @@ if (hasStartBtn) {
   ok("ターンバイターン案内バナー表示", navState.banner, `"${navState.bannerText}" / 残り ${navState.navInfo}`);
 }
 
-// 6. 表示モード切替
-const modeSwitch = await cdp.eval(`
-  const f0 = [window.__colony.colony.uForward.value.x, window.__colony.colony.uForward.value.y];
-  document.querySelectorAll('.fab')[0].click();  // view mode fab
-  await new Promise(r=>setTimeout(r,600));
-  const f1 = [window.__colony.colony.uForward.value.x, window.__colony.colony.uForward.value.y];
-  return {f0, f1, changed: (f0[0]!==f1[0]||f0[1]!==f1[1])};
+// 6. 「終了」ボタンでナビが確実に終わる (地図クリック判定に食われないこと)
+const ended = await cdp.eval(`
+  const btn = document.querySelector('.bottom-card [data-a="end"]');
+  if (!btn) return { hadBtn:false };
+  const r = btn.getBoundingClientRect();
+  const cx = r.left + r.width/2, cy = r.top + r.height/2;
+  const opt = {bubbles:true, clientX:cx, clientY:cy};
+  btn.dispatchEvent(new PointerEvent('pointerdown', opt));
+  btn.dispatchEvent(new PointerEvent('pointerup', opt));
+  btn.click();
+  window.dispatchEvent(new PointerEvent('pointerup', opt));
+  await new Promise(r=>setTimeout(r,1200));
+  const card = document.querySelector('.bottom-card');
+  return {
+    hadBtn: true,
+    cardHidden: !card || card.classList.contains('hidden'),
+    route: !!window.__colony.route,
+    mode: window.__colony.car.mode,
+  };
 `);
-ok("表示モード切替でforward方向が変化", modeSwitch.changed,
-   `${modeSwitch.f0.map(n=>n.toFixed(2))} -> ${modeSwitch.f1.map(n=>n.toFixed(2))}`);
+ok("『終了』でナビが終了しカードが消える",
+   ended.hadBtn && ended.cardHidden && !ended.route,
+   `card非表示=${ended.cardHidden} route=${ended.route} mode=${ended.mode}`);
+
+// 7. 表示モード切替: 北向き / 進行方向 が実際に一致するか
+// forward は目標へ補間するので、収束するまでポーリングする
+const deg = (r) => +((r * 180) / Math.PI).toFixed(1);
+const fwdDeg = () =>
+  cdp.eval(`
+    const v = window.__colony.colony.uForward.value;
+    return Math.atan2(v.x, v.y) * 180 / Math.PI;
+  `);
+const cycleTo = async (badge) => {
+  for (let i = 0; i < 4; i++) {
+    const cur = await cdp.eval(`return document.querySelectorAll('.fab')[0].textContent;`);
+    if (cur.includes(badge)) return true;
+    await cdp.eval(`document.querySelectorAll('.fab')[0].click();`);
+    await sleep(400);
+  }
+  return false;
+};
+const settleUntil = async (pred) => {
+  let last = null;
+  for (let i = 0; i < 25; i++) {
+    last = await fwdDeg();
+    if (pred(last)) return last;
+    await sleep(400);
+  }
+  return last;
+};
+
+await cycleTo("N");
+const northDeg = await settleUntil((d) => Math.abs(d) < 2);
+ok("ノースアップが真北を向く", Math.abs(northDeg) < 2, `forward方位=${northDeg.toFixed(1)}°`);
+
+await cycleTo("車");
+const carHeadingDeg = await cdp.eval(`
+  const h = window.__colony.car.heading;
+  return Math.atan2(Math.sin(h), Math.cos(h)) * 180 / Math.PI;
+`);
+const headDeg = await settleUntil((d) => Math.abs(d - carHeadingDeg) < 4);
+ok(
+  "車アップが進行方向と一致",
+  Math.abs(headDeg - carHeadingDeg) < 4,
+  `forward=${headDeg.toFixed(1)}° / car.heading=${deg((carHeadingDeg * Math.PI) / 180)}°`,
+);
+
+// 8. 地名・施設ラベル
+const labelInfo = await cdp.eval(`
+  const els = [...document.querySelectorAll('.label')].filter(e => e.style.display !== 'none');
+  return { n: els.length, sample: els.slice(0,3).map(e=>e.textContent) };
+`);
+ok("地名・施設ラベル表示", labelInfo.n > 5, `${labelInfo.n}件 例: ${labelInfo.sample.join(" / ")}`);
 
 // スクリーンショット
 const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
