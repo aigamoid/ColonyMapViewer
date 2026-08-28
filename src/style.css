@@ -266,6 +266,38 @@ canvas {
     -1px -1px 0 #0009;
 }
 
+/* 階層ごとに色分け: 自治体 → 区 → 町名 → 施設 */
+.label--city {
+  color: #ffdf9b;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.label--ward {
+  color: #ffc39a;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.label--district {
+  color: #b9d6f2;
+  font-weight: 600;
+}
+.label--poi {
+  color: #9fe3bd;
+  font-weight: 500;
+}
+/* 施設は先頭に小さな点を付けて地名と区別する */
+.label--poi::before {
+  content: "";
+  display: inline-block;
+  width: 0.4em;
+  height: 0.4em;
+  margin-right: 0.4em;
+  vertical-align: 0.1em;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 3px #000;
+}
+
 .toast {
   position: fixed;
   left: 50%;

@@ -13,7 +13,8 @@ import { ColonyUniforms, colonyWarpCPU } from "./colony";
  * (自車が動くたび変形が変わるので毎フレーム再計算)。
  */
 
-export type LabelKind = "city" | "district" | "poi";
+/** 市区町村 > 区 > 町名 > 施設 の 4 階層。色とサイズで階層を区別する。 */
+export type LabelKind = "city" | "ward" | "district" | "poi";
 
 export interface LabelItem {
   /** ローカル座標 (m) */
@@ -27,30 +28,37 @@ export interface LabelItem {
   priority: number;
 }
 
-interface Slot {
-  el: HTMLDivElement;
-  used: boolean;
+interface KindStyle {
+  /** この距離まではフルサイズ・不透明 */
+  near: number;
+  /** これを超えたら表示しない */
+  far: number;
+  sizeNear: number;
+  sizeFar: number;
+  alphaFar: number;
+  /** 同時に出す最大数 */
+  maxCount: number;
 }
 
-const KIND_STYLE: Record<LabelKind, { size: number; weight: number; color: string }> = {
-  city: { size: 19, weight: 700, color: "#ffffff" },
-  district: { size: 14, weight: 600, color: "#dfe8f5" },
-  poi: { size: 12, weight: 500, color: "#c9d6e8" },
-};
-
-/** ラベルを表示する最大距離 (m)。種別ごと。 */
-const MAX_DIST: Record<LabelKind, number> = {
-  city: 9000,
-  district: 4000,
-  poi: 900,
+/**
+ * コロニー変形では遠景が地平線付近に強く圧縮される。
+ * そこを小さい文字で埋めると読めないので、遠いラベルは「薄く・少し大きく」して
+ * 背景として奥行きを示し、近いラベルは濃く小さめにして主役にする。
+ */
+const KIND: Record<LabelKind, KindStyle> = {
+  city: { near: 2500, far: 16000, sizeNear: 20, sizeFar: 27, alphaFar: 0.4, maxCount: 5 },
+  ward: { near: 1200, far: 6500, sizeNear: 17, sizeFar: 22, alphaFar: 0.38, maxCount: 9 },
+  district: { near: 450, far: 2400, sizeNear: 13.5, sizeFar: 17, alphaFar: 0.32, maxCount: 24 },
+  // 建物 / 施設は遠くにあっても役に立たないので早めに打ち切る
+  poi: { near: 160, far: 430, sizeNear: 13, sizeFar: 11.5, alphaFar: 0.35, maxCount: 18 },
 };
 
 export class LabelLayer {
   private root: HTMLDivElement;
-  private slots: Slot[] = [];
+  private els: HTMLDivElement[] = [];
   private items: LabelItem[] = [];
   private visible = true;
-  private readonly ndc = new THREE.Vector3();
+  private readonly v = new THREE.Vector3();
 
   constructor(container: HTMLElement) {
     this.root = document.createElement("div");
@@ -67,25 +75,19 @@ export class LabelLayer {
     this.root.style.display = v ? "" : "none";
   }
 
-  get enabled(): boolean {
-    return this.visible;
-  }
-
   clear(): void {
     this.items = [];
-    for (const s of this.slots) s.el.style.display = "none";
+    for (const el of this.els) el.style.display = "none";
   }
 
-  private slot(i: number): Slot {
-    let s = this.slots[i];
-    if (!s) {
-      const el = document.createElement("div");
-      el.className = "label";
+  private el(i: number): HTMLDivElement {
+    let el = this.els[i];
+    if (!el) {
+      el = document.createElement("div");
       this.root.append(el);
-      s = { el, used: false };
-      this.slots[i] = s;
+      this.els[i] = el;
     }
-    return s;
+    return el;
   }
 
   /** 毎フレーム: 変形 → 投影 → 重なり除去 → DOM 更新 */
@@ -97,48 +99,64 @@ export class LabelLayer {
     const carX = colony.uCarLocal.value.x;
     const carZ = colony.uCarLocal.value.y;
 
-    type Cand = {
+    interface Cand {
       item: LabelItem;
       sx: number;
       sy: number;
       w: number;
       h: number;
-      dist: number;
+      size: number;
       alpha: number;
-    };
+      dist: number;
+    }
     const cands: Cand[] = [];
 
     for (const it of this.items) {
+      const st = KIND[it.kind];
       const dist = Math.hypot(it.x - carX, it.z - carZ);
-      const maxD = MAX_DIST[it.kind];
-      if (dist > maxD) continue;
+      if (dist > st.far) continue;
 
-      const p = colonyWarpCPU(it.x, it.y, it.z, colony);
-      this.ndc.copy(p).project(camera);
-      if (this.ndc.z < -1 || this.ndc.z > 1) continue;
+      colonyWarpCPU(it.x, it.y, it.z, colony, this.v);
+      this.v.project(camera);
+      if (this.v.z < -1 || this.v.z > 1) continue;
 
-      const sx = (this.ndc.x * 0.5 + 0.5) * W;
-      const sy = (-this.ndc.y * 0.5 + 0.5) * H;
-      if (sx < -80 || sx > W + 80 || sy < -30 || sy > H + 30) continue;
+      const sx = (this.v.x * 0.5 + 0.5) * W;
+      const sy = (-this.v.y * 0.5 + 0.5) * H;
+      if (sx < -100 || sx > W + 100 || sy < -40 || sy > H + 40) continue;
 
-      const st = KIND_STYLE[it.kind];
-      // 実測せず概算 (毎フレームの reflow を避ける)
-      const w = it.text.length * st.size * 0.62 + 12;
-      const h = st.size * 1.5;
-      // 遠いほど薄く
-      const alpha = 1 - Math.min(1, Math.max(0, (dist / maxD - 0.65) / 0.35)) * 0.75;
-      cands.push({ item: it, sx, sy, w, h, dist, alpha });
+      // near..far を 0..1 に。near 以内は完全にフルサイズ・不透明。
+      const t = THREE.MathUtils.clamp(
+        (dist - st.near) / Math.max(1, st.far - st.near),
+        0,
+        1,
+      );
+      // 距離感が出るよう非線形に (手前でほとんど変化させない)
+      const k = t * t;
+      const size = st.sizeNear + (st.sizeFar - st.sizeNear) * k;
+      const alpha = 1 + (st.alphaFar - 1) * k;
+
+      cands.push({
+        item: it,
+        sx,
+        sy,
+        w: it.text.length * size * 0.64 + 14,
+        h: size * 1.6,
+        size,
+        alpha,
+        dist,
+      });
     }
 
-    // 重要度 → 近い順
-    cands.sort(
-      (a, b) => a.item.priority - b.item.priority || a.dist - b.dist,
-    );
+    cands.sort((a, b) => a.item.priority - b.item.priority || a.dist - b.dist);
 
     const placed: Cand[] = [];
-    const limit = 70;
+    const perKind: Record<string, number> = {};
     for (const c of cands) {
-      if (placed.length >= limit) break;
+      if (placed.length >= 64) break;
+      const st = KIND[c.item.kind];
+      const used = perKind[c.item.kind] ?? 0;
+      if (used >= st.maxCount) continue;
+
       const l = c.sx - c.w / 2;
       const r = c.sx + c.w / 2;
       const t = c.sy - c.h / 2;
@@ -155,24 +173,24 @@ export class LabelLayer {
           break;
         }
       }
-      if (!hit) placed.push(c);
+      if (hit) continue;
+      placed.push(c);
+      perKind[c.item.kind] = used + 1;
     }
 
     for (let i = 0; i < placed.length; i++) {
       const c = placed[i];
-      const s = this.slot(i);
-      const st = KIND_STYLE[c.item.kind];
-      const el = s.el;
+      const el = this.el(i);
+      const cls = `label label--${c.item.kind}`;
+      if (el.className !== cls) el.className = cls;
       if (el.textContent !== c.item.text) el.textContent = c.item.text;
       el.style.display = "";
       el.style.transform = `translate(-50%,-50%) translate(${c.sx.toFixed(1)}px,${c.sy.toFixed(1)}px)`;
-      el.style.fontSize = `${st.size}px`;
-      el.style.fontWeight = String(st.weight);
-      el.style.color = st.color;
+      el.style.fontSize = `${c.size.toFixed(1)}px`;
       el.style.opacity = c.alpha.toFixed(2);
     }
-    for (let i = placed.length; i < this.slots.length; i++) {
-      this.slots[i].el.style.display = "none";
+    for (let i = placed.length; i < this.els.length; i++) {
+      this.els[i].style.display = "none";
     }
   }
 }

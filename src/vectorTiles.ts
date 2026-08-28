@@ -49,15 +49,29 @@ const POI_PRIORITY: Record<string, number> = {
 /** 交通系 POI は駅級のみ (停留所は数が多すぎる) */
 const RAILWAY_SUBCLASS = new Set(["station", "subway", "halt"]);
 
-const PLACE_PRIORITY: Record<string, { p: number; kind: "city" | "district" }> = {
-  city: { p: 0, kind: "city" },
-  town: { p: 1, kind: "city" },
-  village: { p: 2, kind: "district" },
-  borough: { p: 3, kind: "district" },
-  suburb: { p: 4, kind: "district" },
-  quarter: { p: 5, kind: "district" },
-  neighbourhood: { p: 6, kind: "district" },
-};
+/**
+ * place の class + rank → 表示階層。
+ *
+ * 日本では東京都も中央区も class="city" になるため class だけでは階層を分けられない。
+ * OMT の rank はタイル内での重要度順で (東京都=1, 各区=12〜15, 町名=16〜)、
+ * これを閾値にすると自治体 / 区 / 町名がきれいに分かれる。
+ */
+function placeKind(cls: string, rank: number): LabelItem["kind"] | null {
+  switch (cls) {
+    case "city":
+    case "town":
+      return rank <= 8 ? "city" : "ward";
+    case "borough":
+    case "suburb":
+      return "ward";
+    case "village":
+    case "quarter":
+    case "neighbourhood":
+      return "district";
+    default:
+      return null;
+  }
+}
 
 type Pt = { x: number; y: number };
 type ToLocal = (px: number, py: number) => [number, number];
@@ -313,13 +327,12 @@ function collectLabels(
     for (let i = 0; i < pl.length; i++) {
       const f = pl.feature(i);
       const p = f.properties as Record<string, unknown>;
-      const spec = PLACE_PRIORITY[p["class"] as string];
-      if (!spec) continue;
+      const rank = typeof p["rank"] === "number" ? p["rank"] : 40;
+      const kind = placeKind(p["class"] as string, rank);
+      if (!kind) continue;
       const name = labelName(p);
       if (!name) continue;
-      // 同じ class 内の順位も加味 (rank が小さいほど主要)
-      const rank = typeof p["rank"] === "number" ? p["rank"] : 20;
-      push(f.loadGeometry() as Pt[][], name, spec.kind, spec.p * 100 + rank);
+      push(f.loadGeometry() as Pt[][], name, kind, rank);
     }
   }
 
@@ -336,7 +349,8 @@ function collectLabels(
       const name = labelName(p);
       if (!name || name.length > 24) continue;
       const rank = typeof p["rank"] === "number" ? p["rank"] : 9;
-      push(f.loadGeometry() as Pt[][], name, "poi", base * 100 + rank);
+      // place より必ず後回しになるよう 1000 番台に置く
+      push(f.loadGeometry() as Pt[][], name, "poi", 1000 + base * 100 + rank);
     }
   }
 }

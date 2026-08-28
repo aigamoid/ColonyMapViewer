@@ -102,6 +102,7 @@ let gridMesh: THREE.Object3D | null = null;
 let heightScale = BUILDING_EXAGGERATION;
 let elevSample: (x: number, z: number) => number = () => 0;
 let worldEpoch = 0; // 読み込み中に再配置が走ったら古い結果を捨てるための世代番号
+let lastLabelItems: import("./labels").LabelItem[] = []; // デバッグ用
 let viewMode: ViewModeId = "north";
 let camDist = 16;
 let dragYaw = 0;
@@ -348,9 +349,13 @@ async function loadWorld(origin: LngLat, placeCarAt?: LngLat): Promise<void> {
 
   // ラベルは地面から少し浮かせる (建物や地形に埋もれないように)
   for (const l of region.labels) {
-    l.y = elevSample(l.x, l.z) + (l.kind === "poi" ? 22 : 55);
+    // 階層が上ほど高く浮かせて、建物越しでも読めるようにする
+    const lift =
+      l.kind === "poi" ? 20 : l.kind === "district" ? 60 : l.kind === "ward" ? 110 : 170;
+    l.y = elevSample(l.x, l.z) + lift;
   }
   labels.setItems(region.labels);
+  lastLabelItems = region.labels;
   ui.toast(terrain.mesh ? "準備完了" : "準備完了 (地形データなし)");
 }
 
@@ -565,6 +570,7 @@ const ui = new UI(app, {
     ui.toast("建物高さは次回読み込みから反映されます");
   },
   onToggleLabels: (on) => labels.setVisible(on),
+  onDriveSpeed: (mps) => (car.demoSpeed = mps),
   onCamDist: (d) => (camDist = d),
 });
 
@@ -600,6 +606,7 @@ interface ColonyDebug {
   readonly regionLoaded: boolean;
   readonly counts: Record<string, number>;
   elevAt: (x: number, z: number) => number;
+  readonly labelItems: import("./labels").LabelItem[];
   raycastGround: (x: number, z: number) => number | null;
 }
 // 開発 / E2E 用フック。本番ビルド (?debug=1 指定時のみ) では公開しない。
@@ -620,6 +627,9 @@ const colonyDebug: ColonyDebug = {
     return !!regionGroup;
   },
   elevAt: (x: number, z: number) => elevSample(x, z),
+  get labelItems() {
+    return lastLabelItems;
+  },
   raycastGround: (x: number, z: number) => {
     // ビュー空間でなくローカル空間の地形三角形へ真下からレイを飛ばし、
     // elevSample() と描画メッシュが一致しているか検証する用

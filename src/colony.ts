@@ -240,12 +240,16 @@ export function applyColony(
   material.needsUpdate = true;
 }
 
-/** ローカル(東,北,標高) を CPU 側でビュー空間へ変換 (ピン等の非シェーダ要素用) */
+/**
+ * ローカル(東,北,標高) を CPU 側でビュー空間へ変換 (ピン・ラベル等の非シェーダ要素用)。
+ * `out` を渡すと確保せずそこへ書き込む (毎フレーム大量に呼ぶ用途向け)。
+ */
 export function colonyWarpCPU(
   x: number,
   y: number,
   z: number,
-  u: ColonyUniforms
+  u: ColonyUniforms,
+  out?: THREE.Vector3,
 ): THREE.Vector3 {
   const pcx = x - u.uCarLocal.value.x;
   const pcy = y - u.uCarElev.value;
@@ -261,9 +265,8 @@ export function colonyWarpCPU(
   // GLSL 版と同じく「平面 ←→ 巻き付け」を位置で補間する
   const mix = u.uColonyMix.value;
   const lerp = (flat: number, warped: number) => flat + (warped - flat) * mix;
-  return new THREE.Vector3(
-    lerp(f.x * s + a.x * t, f.x * fwd + a.x * t),
-    lerp(pcy, up),
-    lerp(f.y * s + a.y * t, f.y * fwd + a.y * t),
-  );
+  const vx = lerp(f.x * s + a.x * t, f.x * fwd + a.x * t);
+  const vy = lerp(pcy, up);
+  const vz = lerp(f.y * s + a.y * t, f.y * fwd + a.y * t);
+  return out ? out.set(vx, vy, vz) : new THREE.Vector3(vx, vy, vz);
 }

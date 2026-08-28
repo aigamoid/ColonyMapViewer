@@ -14,6 +14,8 @@ export class Car {
   speed = 0; // m/s
   mode: DriveMode = "idle";
 
+  /** デモ走行の速度 (m/s)。オートパイロットの巡航速度・フリードライブの上限。 */
+  demoSpeed = 14;
   /** GPS の水平精度 (m)。未取得なら null */
   accuracy: number | null = null;
   /** GPS 座標を受け取ったときのコールバック (世界の再アンカー判定用) */
@@ -131,7 +133,7 @@ export class Car {
       this.z = this.path[0].z;
     }
     this.mode = "autopilot";
-    this.speed = 14; // ~50 km/h
+    this.speed = this.demoSpeed;
   }
 
   stop(): void {
@@ -148,10 +150,11 @@ export class Car {
 
   private updateFreedrive(dt: number): void {
     const k = this.keys;
-    const accel = 8;
-    const maxSpeed = 25;
+    const maxSpeed = this.demoSpeed;
+    const accel = Math.max(4, maxSpeed * 0.6);
     if (k.has("w") || k.has("arrowup")) this.speed = Math.min(maxSpeed, this.speed + accel * dt);
-    else if (k.has("s") || k.has("arrowdown")) this.speed = Math.max(-8, this.speed - accel * dt);
+    else if (k.has("s") || k.has("arrowdown"))
+      this.speed = Math.max(-maxSpeed * 0.4, this.speed - accel * dt);
     else this.speed *= 1 - Math.min(1, 2 * dt);
 
     const turn = 1.6 * dt * (this.speed >= 0 ? 1 : -1);
@@ -167,6 +170,8 @@ export class Car {
       this.speed = 0;
       return;
     }
+    // 走行中でも速度スライダーを即座に反映する
+    this.speed = this.demoSpeed;
     let remain = this.speed * dt;
     while (remain > 0 && this.pathI < this.path.length - 1) {
       const cur = { x: this.x, z: this.z };

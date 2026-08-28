@@ -15,6 +15,8 @@ export interface UICallbacks {
   onRadius: (r: number) => void;
   onThetaMax: (t: number) => void;
   onHeightScale: (h: number) => void;
+  /** デモ走行速度 (m/s) */
+  onDriveSpeed: (mps: number) => void;
   onToggleLabels: (on: boolean) => void;
   onCamDist: (d: number) => void;
 }
@@ -93,11 +95,13 @@ export class UI {
         <input type="range" data-k="t" min="10" max="100" step="2" value="66" />
         <label>建物高さ <span data-v="h">1.0×</span></label>
         <input type="range" data-k="h" min="0.5" max="3" step="0.25" value="1" />
+        <label>走行速度 <span data-v="s">50 km/h</span></label>
+        <input type="range" data-k="s" min="5" max="160" step="5" value="50" />
         <label style="cursor:pointer">地名・施設ラベル
           <input type="checkbox" data-k="labels" checked />
         </label>
-        <label>カメラ距離 <span data-v="c">9 m</span></label>
-        <input type="range" data-k="c" min="3" max="30" step="1" value="9" />
+        <label>カメラ距離 <span data-v="c">16 m</span></label>
+        <input type="range" data-k="c" min="5" max="60" step="1" value="16" />
       </div>`;
     root.append(this.settings);
 
@@ -160,6 +164,9 @@ export class UI {
         } else if (k === "h") {
           label.textContent = `${v.toFixed(1)}×`;
           this.cb.onHeightScale(v);
+        } else if (k === "s") {
+          label.textContent = `${v} km/h`;
+          this.cb.onDriveSpeed(v / 3.6);
         } else {
           label.textContent = `${v} m`;
           this.cb.onCamDist(v);
