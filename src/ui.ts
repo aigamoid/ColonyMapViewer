@@ -13,6 +13,7 @@ export interface UICallbacks {
   onToggleGps: () => void;
   onSetViewMode: (m: ViewModeId) => void;
   onRadius: (r: number) => void;
+  onThetaMax: (t: number) => void;
   onHeightScale: (h: number) => void;
   onCamDist: (d: number) => void;
 }
@@ -85,10 +86,12 @@ export class UI {
     this.settings.innerHTML = `
       <h4><span>コロニー調整</span><span class="toggle">＋</span></h4>
       <div class="settings-body">
-        <label>半径 R <span data-v="r">650 m</span></label>
-        <input type="range" data-k="r" min="300" max="5000" step="50" value="650" />
+        <label>半径 R <span data-v="r">1100 m</span></label>
+        <input type="range" data-k="r" min="600" max="6000" step="50" value="1100" />
+        <label>曲げの強さ <span data-v="t">66°</span></label>
+        <input type="range" data-k="t" min="10" max="100" step="2" value="66" />
         <label>建物高さ <span data-v="h">1.0×</span></label>
-        <input type="range" data-k="h" min="1" max="8" step="0.5" value="1" />
+        <input type="range" data-k="h" min="0.5" max="3" step="0.25" value="1" />
         <label>カメラ距離 <span data-v="c">9 m</span></label>
         <input type="range" data-k="c" min="3" max="30" step="1" value="9" />
       </div>`;
@@ -140,6 +143,9 @@ export class UI {
         if (k === "r") {
           label.textContent = `${v} m`;
           this.cb.onRadius(v);
+        } else if (k === "t") {
+          label.textContent = `${v}°`;
+          this.cb.onThetaMax((v * Math.PI) / 180);
         } else if (k === "h") {
           label.textContent = `${v.toFixed(1)}×`;
           this.cb.onHeightScale(v);

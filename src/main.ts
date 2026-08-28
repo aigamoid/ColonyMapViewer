@@ -5,6 +5,7 @@ import {
   createColonyUniforms,
   setForward,
   applyColony,
+  colonyThetaInverse,
 } from "./colony";
 import { loadRegion } from "./vectorTiles";
 import { loadTerrain } from "./terrain";
@@ -19,14 +20,23 @@ import {
 import { UI, ViewModeId, fmtDistance, fmtDuration } from "./ui";
 import type { GeocodeHit } from "./routing";
 
-// 初期位置: サンフランシスコ Embarcadero (湾に開けて奥に高層ビル群 = コロニー曲面が映える)
-const START: LngLat = { lng: -122.3937, lat: 37.7955 };
+// 初期位置: サンフランシスコ Market St (碁盤目の街路が正面に伸び、奥に高層ビル群)
+const START: LngLat = { lng: -122.4013, lat: 37.7897 };
+const START_HEADING = (-55 * Math.PI) / 180; // 北西向き = Market St に沿って市街を見る
 const TILE_Z = 14; // OpenFreeMap planet の最大ズーム
 const TILE_RING = 2;
 const TERRAIN_Z = 13;
-const TERRAIN_RING = 2;
-const BUILDING_EXAGGERATION = 1.6;
-const DEFAULT_R = 650;
+const TERRAIN_RING = 1; // ベクタータイル範囲 (約9.7km) に合わせる
+const BUILDING_EXAGGERATION = 1.0;
+/**
+ * コロニー半径。建物の高さは円柱軸方向に伸びるため、
+ * R は想定する最大建物高さ (約 220m) より十分大きくないと建物が観測者を串刺しにする。
+ */
+const DEFAULT_R = 1100;
+/** 巻き上げ角の上限 (rad)。約66°。90°を超えると遠景が屋根の壁に潰れる。 */
+const DEFAULT_THETA_MAX = 1.15;
+/** カメラの基本仰角 (rad)。上向きにするほどコロニー壁が広く映る。 */
+const BASE_PITCH = 0.2;
 
 const app = document.getElementById("app")!;
 
@@ -62,8 +72,9 @@ scene.add(sun);
   scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x8899bb, size: 8 })));
 }
 
-const colony: ColonyUniforms = createColonyUniforms(DEFAULT_R);
-const frame = new LocalFrame(START);
+const colony: ColonyUniforms = createColonyUniforms(DEFAULT_R, DEFAULT_THETA_MAX);
+// frame は GPS で遠方へ飛んだときに貼り直す (世界の原点を自車位置へ再アンカー)
+let frame = new LocalFrame(START);
 const car = new Car(frame);
 
 // 自車メッシュ
@@ -85,8 +96,11 @@ scene.add(carMesh);
 
 // 状態
 let regionGroup: THREE.Group | null = null;
+let terrainMesh: THREE.Mesh | null = null;
+let gridMesh: THREE.Object3D | null = null;
 let heightScale = BUILDING_EXAGGERATION;
 let elevSample: (x: number, z: number) => number = () => 0;
+let worldEpoch = 0; // 読み込み中に再配置が走ったら古い結果を捨てるための世代番号
 let viewMode: ViewModeId = "north";
 let camDist = 16;
 let dragYaw = 0;
@@ -210,18 +224,48 @@ function inverseColony(p: THREE.Vector3): { x: number; z: number } {
   const relFwd = p.x * f.x + p.z * f.y;
   const relLat = p.x * a.x + p.z * a.y;
   const theta = Math.atan2(relFwd, R - p.y);
-  const s = theta * R;
+  const s = colonyThetaInverse(theta, colony);
   return {
     x: car.x + f.x * s + a.x * relLat,
     z: car.z + f.y * s + a.y * relLat,
   };
 }
 
-async function loadWorld(): Promise<void> {
-  ui.toast("地図データを読み込み中…");
-  const [txf, tyf] = lngLatToTile(START.lng, START.lat, TILE_Z);
-  const [ttxf, ttyf] = lngLatToTile(START.lng, START.lat, TERRAIN_Z);
+function disposeTree(obj: THREE.Object3D): void {
+  obj.traverse((o) => {
+    const m = o as THREE.Mesh;
+    m.geometry?.dispose();
+    const mat = m.material;
+    if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+    else mat?.dispose();
+  });
+}
 
+function clearWorld(): void {
+  for (const o of [regionGroup, terrainMesh, gridMesh]) {
+    if (!o) continue;
+    scene.remove(o);
+    disposeTree(o);
+  }
+  regionGroup = null;
+  terrainMesh = null;
+  gridMesh = null;
+  elevSample = () => 0;
+  car.setElevationSampler(elevSample);
+}
+
+/**
+ * origin を中心に地形・ベクタータイルを読み込む。
+ * 既存の世界は破棄され、frame と自車位置が origin 基準に貼り直される。
+ */
+async function loadWorld(origin: LngLat, placeCarAt?: LngLat): Promise<void> {
+  const epoch = ++worldEpoch;
+  clearWorld();
+  frame = new LocalFrame(origin);
+  car.setFrame(frame, placeCarAt);
+  ui.toast("地図データを読み込み中…");
+
+  const [ttxf, ttyf] = lngLatToTile(origin.lng, origin.lat, TERRAIN_Z);
   const terrain = await loadTerrain(
     frame,
     TERRAIN_Z,
@@ -229,14 +273,18 @@ async function loadWorld(): Promise<void> {
     Math.floor(ttyf),
     TERRAIN_RING,
   );
+  if (epoch !== worldEpoch) return;
+
   car.setElevationSampler(terrain.sample);
   elevSample = terrain.sample;
   if (terrain.mesh && terrain.material) {
     applyColony(terrain.material, colony);
+    terrainMesh = terrain.mesh;
     scene.add(terrain.mesh);
   }
   addColonyGrid();
 
+  const [txf, tyf] = lngLatToTile(origin.lng, origin.lat, TILE_Z);
   const region = await loadRegion(
     frame,
     TILE_Z,
@@ -246,10 +294,56 @@ async function loadWorld(): Promise<void> {
     heightScale,
     terrain.sample,
   );
-  for (const m of region.materials) applyColony(m, colony, m === region.buildingMat);
+  if (epoch !== worldEpoch) {
+    disposeTree(region.group);
+    return;
+  }
+  for (const m of region.materials) {
+    const isBuilding = m === region.buildingMat;
+    applyColony(m, colony, { nearFade: isBuilding, heightFalloff: isBuilding });
+  }
   regionGroup = region.group;
   scene.add(region.group);
+  snapCarToRoad(region.roadCenters);
   ui.toast(terrain.mesh ? "準備完了" : "準備完了 (地形データなし)");
+}
+
+/**
+ * 自車を最寄りの車道へ寄せる。
+ * 建物の内部で開始すると TPS カメラが壁に埋まって何も見えないため。
+ * GPS 追従中は実測位置を優先するのでスナップしない。
+ */
+function snapCarToRoad(centers: Float32Array): void {
+  if (car.mode === "gps" || centers.length < 2) return;
+  let bestD = Infinity;
+  let bx = car.x;
+  let bz = car.z;
+  for (let i = 0; i < centers.length; i += 2) {
+    const d = (centers[i] - car.x) ** 2 + (centers[i + 1] - car.z) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      bx = centers[i];
+      bz = centers[i + 1];
+    }
+  }
+  if (bestD > 400 ** 2) return; // 近くに道路が無ければそのまま
+  car.x = bx;
+  car.z = bz;
+}
+
+/** 読み込み済み範囲の半径 (m)。これを超えたら世界を貼り直す。 */
+const WORLD_RADIUS = 3500;
+
+/** 自車が読み込み範囲外に出た / GPS が遠方を返した場合に世界を再アンカーする */
+function ensureWorldCovers(ll: LngLat): boolean {
+  const l = frame.toLocal(ll);
+  if (Math.hypot(l.x, l.z) < WORLD_RADIUS) return false;
+  ui.toast("現在地の地図を読み込みます…");
+  navigating = false;
+  clearRoute();
+  // 新しい原点 = 現在地。自車もそこへ移す (元の緯度経度に取り残さない)
+  loadWorld(ll, ll);
+  return true;
 }
 
 async function setDestination(ll: LngLat, label: string): Promise<void> {
@@ -413,13 +507,14 @@ const ui = new UI(app, {
     } else {
       car.startGps();
       ui.setGpsActive(true);
-      ui.toast("GPS 追従を開始");
+      ui.toast("現在地を取得中…");
     }
   },
   onSetViewMode: (m) => {
     viewMode = m;
   },
   onRadius: (r) => (colony.uColonyR.value = r),
+  onThetaMax: (t) => (colony.uThetaMax.value = t),
   onHeightScale: (h) => {
     heightScale = h;
     ui.toast("建物高さは次回読み込みから反映されます");
@@ -427,9 +522,26 @@ const ui = new UI(app, {
   onCamDist: (d) => (camDist = d),
 });
 
+// GPS が読み込み範囲外を返したら世界を現在地へ貼り直す
+car.onGpsFix = (ll) => {
+  if (ensureWorldCovers(ll)) {
+    ui.toast("現在地に移動しました");
+    viewMode = "heading";
+    ui.setViewMode("heading");
+  }
+};
+car.onGpsError = (msg) => {
+  ui.toast(msg);
+  ui.setGpsActive(false);
+  car.startFreedrive();
+};
+
+car.heading = START_HEADING;
 car.startFreedrive();
+viewMode = "heading";
+ui.setViewMode("heading");
 ui.toast("フリードライブ: WASD / 矢印キー・地図タップで目的地");
-loadWorld();
+loadWorld(START, START);
 
 // デバッグ / E2E フック
 interface ColonyDebug {
@@ -442,6 +554,8 @@ interface ColonyDebug {
   readonly route: Route | null;
   readonly regionLoaded: boolean;
   readonly counts: Record<string, number>;
+  elevAt: (x: number, z: number) => number;
+  raycastGround: (x: number, z: number) => number | null;
 }
 // 開発 / E2E 用フック。本番ビルド (?debug=1 指定時のみ) では公開しない。
 const debugEnabled =
@@ -459,6 +573,19 @@ const colonyDebug: ColonyDebug = {
   },
   get regionLoaded() {
     return !!regionGroup;
+  },
+  elevAt: (x: number, z: number) => elevSample(x, z),
+  raycastGround: (x: number, z: number) => {
+    // ビュー空間でなくローカル空間の地形三角形へ真下からレイを飛ばし、
+    // elevSample() と描画メッシュが一致しているか検証する用
+    if (!terrainMesh) return null;
+    const rc = new THREE.Raycaster(
+      new THREE.Vector3(x, 9000, z),
+      new THREE.Vector3(0, -1, 0),
+    );
+    // コロニー変形は頂点シェーダ側なので CPU レイキャストは変形前ジオメトリに当たる
+    const hit = rc.intersectObject(terrainMesh, false)[0];
+    return hit ? hit.point.y : null;
   },
   get counts() {
     const c: Record<string, number> = {};
@@ -490,20 +617,21 @@ function tick(): void {
 
   // destPin はコロニー変形シェーダ付きの静的ジオメトリ (毎フレーム更新不要)
 
-  // カメラ: 自車のやや後方・上空から、ほぼ水平に前方を見る。
-  // コロニーの壁がせり上がって上半分を埋める。
+  // カメラ: 自車の真後ろ上空から、やや上向きに前方を見る (TPS)。
+  // カメラ・注視点はビュー空間 (自車が常に原点)。
+  // 画面の下半分に自車周辺の道路、上半分にせり上がったコロニー壁が入る画角。
   const f = colony.uForward.value;
   const yaw = Math.atan2(f.x, f.y) + dragYaw;
-  // カメラ・注視点はビュー空間 (自車が常に原点)。
-  // 屋上より上から市街地越しにコロニーのせり上がりを見る。
-  camera.position.set(
-    -Math.sin(yaw) * camDist,
-    22 + camDist * 1.1,
-    -Math.cos(yaw) * camDist,
+  // 密集市街地では屋上より低いと隣のビルの壁しか見えないので、やや高めに構える
+  const camY = 18 + camDist * 0.8;
+  camera.position.set(-Math.sin(yaw) * camDist, camY, -Math.cos(yaw) * camDist);
+  const pitch = THREE.MathUtils.clamp(BASE_PITCH + dragPitch, -0.4, 1.2);
+  const lookDist = 260;
+  camera.lookAt(
+    Math.sin(yaw) * lookDist,
+    camY + Math.tan(pitch) * lookDist,
+    Math.cos(yaw) * lookDist,
   );
-  const lookDist = 460;
-  const lookUp = 250 + dragPitch * -700;
-  camera.lookAt(Math.sin(yaw) * lookDist, lookUp, Math.cos(yaw) * lookDist);
 
   renderer.render(scene, camera);
   requestAnimationFrame(tick);

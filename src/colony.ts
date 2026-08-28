@@ -24,9 +24,22 @@ export interface ColonyUniforms {
   uColonyMix: { value: number };
   uCarLocal: { value: THREE.Vector2 };
   uCarElev: { value: number };
+  /**
+   * 巻き上げ角の上限 (rad)。
+   * 純粋な円柱だと θ=s/R がどこまでも増え、遠方が頭上を越えて背後へ回り込んでしまう
+   * (「遠距離の目標を目視できる」という目的が達成できない)。
+   * そこで θ = θmax·tanh(s / (R·θmax)) と飽和させる。
+   * 近距離では θ ≈ s/R で円柱と一致し、遠距離は θmax に漸近して画面上端に積み上がる。
+   * 0 以下にすると飽和なし (真の円柱)。
+   *
+   * θ が 90° を超えると建物の「上」方向が観測者を向き、遠景が
+   * 屋根の並んだ一枚の壁に潰れて何も読み取れなくなる。
+   * そのため既定は 1.15 rad (約 66°) 程度に抑える。
+   */
+  uThetaMax: { value: number };
 }
 
-export function createColonyUniforms(radius = 1800): ColonyUniforms {
+export function createColonyUniforms(radius = 1800, thetaMax = 1.15): ColonyUniforms {
   return {
     uColonyR: { value: radius },
     uForward: { value: new THREE.Vector2(0, 1) },
@@ -34,7 +47,25 @@ export function createColonyUniforms(radius = 1800): ColonyUniforms {
     uColonyMix: { value: 1 },
     uCarLocal: { value: new THREE.Vector2(0, 0) },
     uCarElev: { value: 0 },
+    uThetaMax: { value: thetaMax },
   };
+}
+
+/** 前方距離 s -> 巻き上げ角 θ (CPU 側)。GLSL の colonyTheta と同じ式。 */
+export function colonyTheta(s: number, u: ColonyUniforms): number {
+  const lin = s / u.uColonyR.value;
+  const tm = u.uThetaMax.value;
+  return tm <= 0 ? lin : tm * Math.tanh(lin / tm);
+}
+
+/** θ -> 前方距離 s (逆変換)。画面ピックで使う。 */
+export function colonyThetaInverse(theta: number, u: ColonyUniforms): number {
+  const mix = u.uColonyMix.value || 1;
+  const t = theta / mix;
+  const tm = u.uThetaMax.value;
+  if (tm <= 0) return t * u.uColonyR.value;
+  const y = Math.max(-0.999, Math.min(0.999, t / tm));
+  return u.uColonyR.value * tm * Math.atanh(y);
 }
 
 /** forward(東,北) から axis を更新する (forward を +90° 回転) */
@@ -53,24 +84,48 @@ uniform vec2  uAxis;
 uniform float uColonyMix;
 uniform vec2  uCarLocal;
 uniform float uCarElev;
+uniform float uThetaMax;
+
+// WebGL1 の GLSL ES 1.0 には tanh が無いので自前実装 (大きな |x| でも安定)
+float colonyTanh(float x) {
+  float e = exp(-2.0 * abs(x));
+  float t = (1.0 - e) / (1.0 + e);
+  return x < 0.0 ? -t : t;
+}
+
+// 前方距離 s -> 巻き上げ角 θ。θmax で飽和させ遠方が背後へ回り込むのを防ぐ。
+float colonyTheta(float s) {
+  float lin = s / uColonyR;
+  return uThetaMax <= 0.0 ? lin : uThetaMax * colonyTanh(lin / uThetaMax);
+}
 
 vec3 colonyWarpPos(vec3 p) {
   vec3 pc = vec3(p.x - uCarLocal.x, p.y - uCarElev, p.z - uCarLocal.y);
   float s = dot(pc.xz, uForward);
   float t = dot(pc.xz, uAxis);
   float h = pc.y;
-  float theta = (s / uColonyR) * uColonyMix;
-  float radial = uColonyR - h;
-  float fwd = radial * sin(theta);
-  float up  = uColonyR - radial * cos(theta);
-  vec2 horiz = uForward * fwd + uAxis * t;
-  return vec3(horiz.x, up, horiz.y);
+
+  // 変形なし (平面) の位置
+  vec2 flatH = uForward * s + uAxis * t;
+  vec3 flatP = vec3(flatH.x, h, flatH.y);
+
+  // 円柱内面へ巻き付けた位置。
+  // 高さは円柱の「軸へ向かう」方向なので、h が R に近づくと建物が
+  // 軸(=観測者付近)を突き抜けて視界を塞ぐ。軸から一定距離を残すようクランプする。
+  float theta = colonyTheta(s);
+  float radial = max(uColonyR - h, uColonyR * 0.3);
+  vec2 wh = uForward * (radial * sin(theta)) + uAxis * t;
+  vec3 warpP = vec3(wh.x, uColonyR - radial * cos(theta), wh.y);
+
+  // uColonyMix は「平面 ←→ 巻き付け」の補間。
+  // theta にだけ mix を掛けると fwd = radial*sin(0) = 0 になり
+  // 全ジオメトリが 1 本の線へ潰れてしまうので、位置そのものを補間する。
+  return mix(flatP, warpP, uColonyMix);
 }
 
 vec3 colonyWarpNormal(vec3 n, vec3 p) {
   vec3 pc = vec3(p.x - uCarLocal.x, p.y - uCarElev, p.z - uCarLocal.y);
-  float s = dot(pc.xz, uForward);
-  float theta = (s / uColonyR) * uColonyMix;
+  float theta = colonyTheta(dot(pc.xz, uForward)) * uColonyMix;
   float c = cos(theta);
   float sn = sin(theta);
   float nf = dot(n.xz, uForward);
@@ -88,11 +143,25 @@ vec3 colonyWarpNormal(vec3 n, vec3 p) {
  * nearFade=true で、自車の至近 (カメラと自車の間) にある面をフェード/破棄する
  * (TPS カメラが手前のビルに埋まるのを防ぐ)。
  */
+export interface ColonyOptions {
+  /** 自車至近の面をディザ discard する (カメラがビルに埋まるのを防ぐ) */
+  nearFade?: boolean;
+  /**
+   * 遠方ほど高さを圧縮する。建物用。
+   * コロニー内面では建物の「上」は円柱軸 = 観測者の方を向くため、
+   * 遠方の高層ビルが道路や目的地を隠してしまう。近距離は実寸のまま、
+   * 遠距離は平たくすることで「遠くまで見通せる」というこのアプリの目的を成立させる。
+   * 有効にするジオメトリは aBaseY (その建物の接地高さ) 属性を持つ必要がある。
+   */
+  heightFalloff?: boolean;
+}
+
 export function applyColony(
   material: THREE.Material,
   u: ColonyUniforms,
-  nearFade = false,
+  opts: ColonyOptions = {},
 ): void {
+  const { nearFade = false, heightFalloff = false } = opts;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uColonyR = u.uColonyR;
     shader.uniforms.uForward = u.uForward;
@@ -100,11 +169,25 @@ export function applyColony(
     shader.uniforms.uColonyMix = u.uColonyMix;
     shader.uniforms.uCarLocal = u.uCarLocal;
     shader.uniforms.uCarElev = u.uCarElev;
+    shader.uniforms.uThetaMax = u.uThetaMax;
+
+    // 遠方の建物を平たくするための頂点前処理
+    const adjust = heightFalloff
+      ? `
+  vec3 colonyPos = position.xyz;
+  {
+    float relH = colonyPos.y - aBaseY;
+    float d = length(colonyPos.xz - uCarLocal);
+    colonyPos.y = aBaseY + relH * mix(1.0, 0.14, smoothstep(70.0, 420.0, d));
+  }`
+      : `  vec3 colonyPos = position.xyz;`;
 
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        `#include <common>\n${GLSL_WARP}\nvarying float vCarDist;`,
+        `#include <common>\n${GLSL_WARP}\nvarying float vCamDist;${
+          heightFalloff ? "\nattribute float aBaseY;" : ""
+        }`,
       )
       .replace(
         "#include <beginnormal_vertex>",
@@ -112,21 +195,46 @@ export function applyColony(
       )
       .replace(
         "#include <begin_vertex>",
-        `vec3 transformed = colonyWarpPos(position.xyz);\n  vCarDist = length(position.xz - uCarLocal);`,
+        `${adjust}\n  vec3 transformed = colonyWarpPos(colonyPos);`,
+      )
+      .replace(
+        "#include <project_vertex>",
+        `#include <project_vertex>\n  vCamDist = -mvPosition.z;`,
       );
 
     if (nearFade) {
+      // TPS カメラが建物の内部/直前に入り込んで視界を塞ぐのを防ぐ。
+      //
+      // 判定は「カメラからの距離」で行う。自車からの距離だと、カメラを包み込む
+      // 大きな建物 (自車がビルの敷地内に居る場合など) の遠い側の壁が残ってしまう。
+      //
+      // アルファ合成は使わない: 建物は 1 個の巨大メッシュに統合されているため
+      // transparent + depthWrite:false にすると建物同士の遮蔽が壊れ、
+      // 街全体が半透明スラブの重なり (灰色の霞) になってしまう。
+      // 代わりにスクリーン空間ディザで discard する (マテリアルは不透明のまま)。
       shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying float vCamDist;")
         .replace(
-          "#include <common>",
-          "#include <common>\nvarying float vCarDist;",
-        )
-        .replace(
-          "#include <dithering_fragment>",
-          `#include <dithering_fragment>\n  {\n    float f = smoothstep(22.0, 70.0, vCarDist);\n    if (f <= 0.001) discard;\n    gl_FragColor.a *= f;\n  }`,
+          "#include <clipping_planes_fragment>",
+          `#include <clipping_planes_fragment>
+  {
+    float nf = smoothstep(55.0, 150.0, vCamDist);
+    if (nf < 1.0) {
+      // 4x4 Bayer 秩序ディザ。白色ノイズよりざらつきが目立たない。
+      int bx = int(mod(gl_FragCoord.x, 4.0));
+      int by = int(mod(gl_FragCoord.y, 4.0));
+      float bayer[16];
+      bayer[0]=0.0;  bayer[1]=8.0;  bayer[2]=2.0;  bayer[3]=10.0;
+      bayer[4]=12.0; bayer[5]=4.0;  bayer[6]=14.0; bayer[7]=6.0;
+      bayer[8]=3.0;  bayer[9]=11.0; bayer[10]=1.0; bayer[11]=9.0;
+      bayer[12]=15.0;bayer[13]=7.0; bayer[14]=13.0;bayer[15]=5.0;
+      float th = bayer[by * 4 + bx] / 16.0;
+      if (nf < th) discard;
+    }
+  }`,
         );
-      material.transparent = true;
-      material.depthWrite = false; // 半透明の手前ビルが背後のルート等を隠さないように
+      material.transparent = false;
+      material.depthWrite = true;
     }
   };
   material.needsUpdate = true;
@@ -146,13 +254,16 @@ export function colonyWarpCPU(
   const a = u.uAxis.value;
   const s = pcx * f.x + pcz * f.y;
   const t = pcx * a.x + pcz * a.y;
-  const theta = (s / u.uColonyR.value) * u.uColonyMix.value;
-  const radial = u.uColonyR.value - pcy;
+  const theta = colonyTheta(s, u);
+  const radial = Math.max(u.uColonyR.value - pcy, u.uColonyR.value * 0.3);
   const fwd = radial * Math.sin(theta);
   const up = u.uColonyR.value - radial * Math.cos(theta);
+  // GLSL 版と同じく「平面 ←→ 巻き付け」を位置で補間する
+  const mix = u.uColonyMix.value;
+  const lerp = (flat: number, warped: number) => flat + (warped - flat) * mix;
   return new THREE.Vector3(
-    f.x * fwd + a.x * t,
-    up,
-    f.y * fwd + a.y * t
+    lerp(f.x * s + a.x * t, f.x * fwd + a.x * t),
+    lerp(pcy, up),
+    lerp(f.y * s + a.y * t, f.y * fwd + a.y * t),
   );
 }

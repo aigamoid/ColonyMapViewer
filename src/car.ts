@@ -14,10 +14,18 @@ export class Car {
   speed = 0; // m/s
   mode: DriveMode = "idle";
 
+  /** GPS の水平精度 (m)。未取得なら null */
+  accuracy: number | null = null;
+  /** GPS 座標を受け取ったときのコールバック (世界の再アンカー判定用) */
+  onGpsFix: ((ll: LngLat) => void) | null = null;
+  /** GPS エラー通知 */
+  onGpsError: ((msg: string) => void) | null = null;
+
   private keys = new Set<string>();
   private path: { x: number; z: number }[] = [];
   private pathI = 0;
   private geoWatch: number | null = null;
+  private lastFix: { x: number; z: number } | null = null;
 
   constructor(frame: LocalFrame) {
     this.frame = frame;
@@ -27,6 +35,24 @@ export class Car {
 
   get lngLat(): LngLat {
     return this.frame.toLngLat(this.x, this.z);
+  }
+
+  /**
+   * ローカル原点を貼り直す。
+   * `at` を渡すとその緯度経度へ自車を移す (GPS で遠方へ飛んだ場合)。
+   * 省略時は現在の緯度経度を保ったまま x/z を新 frame 基準へ変換する。
+   */
+  setFrame(frame: LocalFrame, at?: LngLat): void {
+    const here = at ?? this.frame.toLngLat(this.x, this.z);
+    this.frame = frame;
+    const l = frame.toLocal(here);
+    this.x = l.x;
+    this.z = l.z;
+    this.lastFix = null;
+    // 経路はローカル座標依存なので破棄
+    this.path = [];
+    this.pathI = 0;
+    if (this.mode === "autopilot") this.mode = "idle";
   }
 
   setElevationSampler(fn: (x: number, z: number) => number): void {
@@ -40,29 +66,59 @@ export class Car {
   }
 
   startGps(): void {
-    if (!navigator.geolocation) return;
+    if (!navigator.geolocation) {
+      this.onGpsError?.("この端末は位置情報に対応していません");
+      return;
+    }
+    if (!isSecureContext) {
+      this.onGpsError?.("位置情報は HTTPS でのみ利用できます");
+      return;
+    }
+    this.stopGps();
     this.mode = "gps";
+    this.speed = 0;
+    this.lastFix = null;
     this.geoWatch = navigator.geolocation.watchPosition(
       (p) => {
-        const l = this.frame.toLocal({
-          lng: p.coords.longitude,
-          lat: p.coords.latitude,
-        });
-        this.x = l.x;
-        this.z = l.z;
+        const ll = { lng: p.coords.longitude, lat: p.coords.latitude };
+        this.accuracy = p.coords.accuracy;
+
+        // 読み込み済み範囲の外なら世界を貼り直してもらう (setFrame が呼ばれる)
+        this.onGpsFix?.(ll);
+
+        const l = this.frame.toLocal(ll);
+        // 進行方向: GPS heading があればそれ、無ければ移動ベクトルから推定
         if (p.coords.heading != null && !Number.isNaN(p.coords.heading)) {
           this.heading = (p.coords.heading * Math.PI) / 180;
+        } else if (this.lastFix) {
+          const dx = l.x - this.lastFix.x;
+          const dz = l.z - this.lastFix.z;
+          if (Math.hypot(dx, dz) > 2) this.heading = Math.atan2(dx, dz);
         }
+        this.x = l.x;
+        this.z = l.z;
+        this.lastFix = { x: l.x, z: l.z };
         this.speed = p.coords.speed ?? 0;
       },
-      () => {},
-      { enableHighAccuracy: true, maximumAge: 1000 },
+      (err) => {
+        const msg =
+          err.code === err.PERMISSION_DENIED
+            ? "位置情報が拒否されました (ブラウザの設定で許可してください)"
+            : err.code === err.POSITION_UNAVAILABLE
+              ? "位置を取得できませんでした"
+              : "位置情報がタイムアウトしました";
+        this.onGpsError?.(msg);
+        this.stopGps();
+        this.mode = "idle";
+      },
+      { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 },
     );
   }
 
   stopGps(): void {
     if (this.geoWatch != null) navigator.geolocation.clearWatch(this.geoWatch);
     this.geoWatch = null;
+    this.accuracy = null;
   }
 
   /** ルート座標列に沿って自動走行を開始 */

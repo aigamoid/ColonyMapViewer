@@ -10,9 +10,12 @@ const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
 
 export interface RegionMeshes {
   group: THREE.Group;
-  /** [0]=地面 [1]=建物 [2]=道路 [3]=水域。建物のみ nearFade を適用する用途で index 参照。 */
+  /** コロニー変形を適用すべきマテリアル一覧 */
   materials: THREE.Material[];
+  /** nearFade を適用するのは建物だけなので識別用に返す */
   buildingMat: THREE.Material;
+  /** 道路中心線の点列 [x0,z0,x1,z1,...]。自車を道路上へスナップするのに使う。 */
+  roadCenters: Float32Array;
 }
 
 type Pt = { x: number; y: number };
@@ -68,7 +71,10 @@ export async function loadRegion(
   const [originMx, originMy] = lngLatToMeters(frame.origin);
 
   const buildingPos: number[] = [];
+  /** 頂点ごとの「その建物の接地高さ」。遠方の建物を平たくする頂点シェーダで使う。 */
+  const buildingBase: number[] = [];
   const seenBuildings = new Set<string>(); // タイル境界での建物重複を除去
+  const roadCenters: number[] = [];
   const roadPos: number[] = [];
   const roadIdx: number[] = [];
   const waterPos: number[] = [];
@@ -100,9 +106,11 @@ export async function loadRegion(
             for (let i = 0; i < bl.length; i++) {
               const feat = bl.feature(i);
               const raw = (feat.properties["render_height"] as number) ?? 0;
-              // render_height が 0/1 の建物は高さ未登録。擬似的にばらつかせる。
-              const known = raw > 2 ? Math.min(raw, 180) : 0;
-              const base = known || 10 + ((Number(feat.id) || i) % 6) * 5;
+              // render_height が 0/1 の建物は高さ未登録。控えめにばらつかせる。
+              // コロニー変形では高さ = 円柱軸方向なので、過剰に高くすると
+              // 建物が軸(観測者付近)へ伸びて視界を塞ぐ。現実的な範囲に収める。
+              const known = raw > 2 ? Math.min(raw, 200) : 0;
+              const base = known || 8 + ((Number(feat.id) || i) % 5) * 4;
               const h = base * heightScale;
               const minH =
                 ((feat.properties["render_min_height"] as number) ?? 0) * heightScale;
@@ -112,6 +120,7 @@ export async function loadRegion(
                 minH,
                 h,
                 buildingPos,
+                buildingBase,
                 elevAt,
                 seenBuildings,
               );
@@ -139,8 +148,15 @@ export async function loadRegion(
               const feat = tl.feature(i);
               const width = roadWidth(feat.properties["class"] as string);
               if (width <= 0) continue;
+              // 車道 (歩道/桟橋を除く) のみスナップ対象にする
+              const snappable = width >= 5;
               for (const line of feat.loadGeometry() as Pt[][]) {
-                ribbon(line, toLocal, width, 0.6, roadPos, roadIdx, elevAt);
+                ribbon(line, toLocal, width, 1.2, roadPos, roadIdx, elevAt);
+                if (!snappable) continue;
+                for (const pt of line) {
+                  const [lx, lz] = toLocal(pt.x, pt.y);
+                  roadCenters.push(lx, lz);
+                }
               }
             }
           }
@@ -150,21 +166,10 @@ export async function loadRegion(
   }
   await Promise.all(jobs);
 
-  // 地面プレーン
-  const a = frame.toLocal(tileToLngLat(centerTileX - ring, centerTileY - ring, z));
-  const b = frame.toLocal(tileToLngLat(centerTileX + ring + 1, centerTileY + ring + 1, z));
-  const groundGeo = new THREE.PlaneGeometry(
-    Math.abs(b.x - a.x) * 1.3,
-    Math.abs(b.z - a.z) * 1.3,
-    1,
-    1,
-  );
-  groundGeo.rotateX(-Math.PI / 2);
-  groundGeo.translate((a.x + b.x) / 2, -120, (a.z + b.z) / 2);
-  const groundMat = new THREE.MeshStandardMaterial({ color: 0x2c333f, roughness: 1 });
-  const ground = new THREE.Mesh(groundGeo, groundMat);
-  ground.name = "ground";
-  group.add(ground);
+  // 注意: ここに「地面プレーン」は置かない。
+  // コロニー変形では標高が低い = 円柱軸から遠い なので、地形より下に敷いた平面は
+  // 街全体を外側から包む巨大なドームに化けて視界を完全に塞いでしまう。
+  // 地面は terrain メッシュが担当する。
 
   const buildingMat = new THREE.MeshStandardMaterial({
     color: 0xb9c2d0,
@@ -189,7 +194,7 @@ export async function loadRegion(
     polygonOffsetUnits: -1,
   });
 
-  addMesh(group, "buildings", buildingPos, null, buildingMat);
+  addMesh(group, "buildings", buildingPos, null, buildingMat, buildingBase);
   addMesh(group, "roads", roadPos, roadIdx, roadMat);
   addMesh(group, "water", waterPos, waterIdx, waterMat);
 
@@ -199,8 +204,9 @@ export async function loadRegion(
 
   return {
     group,
-    materials: [groundMat, buildingMat, roadMat, waterMat],
+    materials: [buildingMat, roadMat, waterMat],
     buildingMat,
+    roadCenters: new Float32Array(roadCenters),
   };
 }
 
@@ -210,10 +216,12 @@ function addMesh(
   pos: number[],
   idx: number[] | null,
   mat: THREE.Material,
+  baseY?: number[],
 ): void {
   if (!pos.length) return;
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  if (baseY) g.setAttribute("aBaseY", new THREE.Float32BufferAttribute(baseY, 1));
   if (idx) g.setIndex(idx);
   g.computeVertexNormals();
   const m = new THREE.Mesh(g, mat);
@@ -335,6 +343,7 @@ function extrudePolygon(
   minH: number,
   maxH: number,
   outPos: number[],
+  outBase: number[],
   elevAt: ElevFn,
   seen: Set<string>,
 ): void {
@@ -373,12 +382,16 @@ function extrudePolygon(
     if (seen.has(key)) continue;
     seen.add(key);
     const e = elevAt(cx, cz);
-    // 高さ未登録(maxH<=0扱いの合図として minH===0 かつ小)の建物にばらつきを与える。
-    // ここでは maxH をそのまま使いつつ、フットプリントが大きいほど高くなる緩い相関を付ける。
+    // 単調にならないよう位置ハッシュで軽くばらつかせる (±25% 程度)。
     const rnd = Math.abs(Math.sin(cx * 12.9898 + cz * 78.233)) % 1;
-    const varied = maxH * (0.6 + rnd * 1.4) + Math.sqrt(area) * 0.35;
+    const varied = maxH * (0.85 + rnd * 0.35);
+    // 高層ビルの圧縮。コロニー内面では建物の「上」が観測者を向くため、
+    // 200m 級の塔をそのまま立てると 1 棟で画面の 4 割を埋めて地図が読めなくなる。
+    // 低層はそのまま、高層ほど強く圧縮する (カーナビの模式的な 3D 建物と同じ考え方)。
+    const compressed = Math.min(varied, 30 + varied * 0.25);
     const botY = e + minH;
-    const topY = e + Math.min(varied, 240);
+    const topY = e + Math.min(compressed, 110);
+    const vertsBefore = outPos.length / 3;
     const tris = earcut(flat, holeIdx.length ? holeIdx : undefined, 2);
     for (let i = 0; i < tris.length; i += 3) {
       const a = local[tris[i]];
@@ -394,6 +407,9 @@ function extrudePolygon(
         x1, botY, z1, x2, topY, z2, x1, topY, z1,
       );
     }
+    // この建物が生成した全頂点に接地高さを持たせる
+    const added = outPos.length / 3 - vertsBefore;
+    for (let i = 0; i < added; i++) outBase.push(botY);
   }
 }
 
