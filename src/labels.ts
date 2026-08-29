@@ -46,8 +46,8 @@ interface KindStyle {
  * 背景として奥行きを示し、近いラベルは濃く小さめにして主役にする。
  */
 const KIND: Record<LabelKind, KindStyle> = {
-  city: { near: 2500, far: 16000, sizeNear: 20, sizeFar: 27, alphaFar: 0.4, maxCount: 5 },
-  ward: { near: 1200, far: 6500, sizeNear: 17, sizeFar: 22, alphaFar: 0.38, maxCount: 9 },
+  city: { near: 4000, far: 26000, sizeNear: 20, sizeFar: 28, alphaFar: 0.38, maxCount: 6 },
+  ward: { near: 1500, far: 12000, sizeNear: 17, sizeFar: 23, alphaFar: 0.34, maxCount: 10 },
   district: { near: 450, far: 2400, sizeNear: 13.5, sizeFar: 17, alphaFar: 0.32, maxCount: 24 },
   // 走行中の道路名はナビの要。手前を濃く、少し先まで見せる
   road: { near: 250, far: 900, sizeNear: 13, sizeFar: 13, alphaFar: 0.3, maxCount: 10 },

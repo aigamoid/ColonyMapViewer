@@ -59,7 +59,7 @@ export async function loadTerrain(
   centerTileX: number,
   centerTileY: number,
   ring: number,
-  seg = 384,
+  seg = 512,
 ): Promise<TerrainResult> {
   const flat: TerrainResult = { mesh: null, material: null, sample: () => 0 };
 

@@ -27,19 +27,31 @@ import { LabelLayer } from "./labels";
 const START: LngLat = { lng: 139.7671, lat: 35.6812 };
 const START_HEADING = (-90 * Math.PI) / 180; // 西向き = 丸の内から皇居方向を見る
 const TILE_Z = 14; // OpenFreeMap planet の最大ズーム
-const TILE_RING = 2;
-const TERRAIN_Z = 13;
-const TERRAIN_RING = 1; // ベクタータイル範囲 (約9.7km) に合わせる
+const TILE_RING = 2; // 5x5 = 約 9.7km 四方 (詳細)
+/**
+ * 遠景リング。z12 は建物が無く道路も間引かれているので広域に向く。
+ * 5x5 で約 40km 四方 = 半径 20km を覆う。
+ */
+const FAR_TILE_Z = 12;
+const FAR_TILE_RING = 2;
+/** 遠景リングのうちこの半径より内側は作らない (詳細リングと二重描画しない) */
+const FAR_SKIP_RADIUS = 4600;
+const TERRAIN_Z = 12;
+const TERRAIN_RING = 2; // 約 40km 四方。遠景リングに合わせる
 const BUILDING_EXAGGERATION = 1.0;
 /**
  * コロニー半径。建物の高さは円柱軸方向に伸びるため、
  * R は想定する最大建物高さ (約 220m) より十分大きくないと建物が観測者を串刺しにする。
  */
-const DEFAULT_R = 1100;
-/** 巻き上げ角の上限 (rad)。約66°。90°を超えると遠景が屋根の壁に潰れる。 */
-const DEFAULT_THETA_MAX = 1.15;
+const DEFAULT_R = 1800;
+/**
+ * 巻き上げ角の上限 (rad)。約80°。
+ * 90°を超えると建物の「上」が観測者を向き遠景が屋根の壁に潰れるので、その手前まで使う。
+ * ここを広く取るほど遠距離に角度を配分でき、20km 先まで判別できるようになる。
+ */
+const DEFAULT_THETA_MAX = 1.396;
 /** カメラの基本仰角 (rad)。上向きにするほどコロニー壁が広く映る。 */
-const BASE_PITCH = 0.2;
+const BASE_PITCH = 0.36;
 
 const app = document.getElementById("app")!;
 
@@ -53,7 +65,7 @@ renderer.setClearColor(0x0b0e14);
 app.append(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x0b0e14, 3000, 24000);
+scene.fog = new THREE.Fog(0x0b0e14, 6000, 46000);
 const camera = new THREE.PerspectiveCamera(76, innerWidth / innerHeight, 0.5, 60000);
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.5));
@@ -99,6 +111,7 @@ scene.add(carMesh);
 
 // 状態
 let regionGroup: THREE.Group | null = null;
+let farRegionGroup: THREE.Group | null = null;
 let terrainMesh: THREE.Mesh | null = null;
 let gridMesh: THREE.Object3D | null = null;
 let heightScale = BUILDING_EXAGGERATION;
@@ -348,12 +361,13 @@ function clearWorld(): void {
   // 世界を貼り直したら現在地表示もすぐ取り直す (10秒の間引きを待たない)
   areaFetchAt = 0;
   areaFetchFrom = null;
-  for (const o of [regionGroup, terrainMesh, gridMesh]) {
+  for (const o of [regionGroup, farRegionGroup, terrainMesh, gridMesh]) {
     if (!o) continue;
     scene.remove(o);
     disposeTree(o);
   }
   regionGroup = null;
+  farRegionGroup = null;
   terrainMesh = null;
   gridMesh = null;
   elevSample = () => 0;
@@ -390,16 +404,36 @@ async function loadWorld(origin: LngLat, placeCarAt?: LngLat): Promise<void> {
   }
   addColonyGrid();
 
-  const [txf, tyf] = lngLatToTile(origin.lng, origin.lat, TILE_Z);
-  const region = await loadRegion(
+  // 遠景リング (低ズーム・幹線道路と水域だけ) を先に載せて 20km 先まで見えるようにする
+  const [fxf, fyf] = lngLatToTile(origin.lng, origin.lat, FAR_TILE_Z);
+  const far = await loadRegion(
     frame,
-    TILE_Z,
-    Math.floor(txf),
-    Math.floor(tyf),
-    TILE_RING,
-    heightScale,
-    terrain.sample,
+    FAR_TILE_Z,
+    Math.floor(fxf),
+    Math.floor(fyf),
+    FAR_TILE_RING,
+    {
+      elevAt: terrain.sample,
+      noBuildings: true,
+      noLabels: true,
+      minRoadWidth: 9, // secondary 以上の幹線のみ
+      skipInsideRadius: FAR_SKIP_RADIUS,
+    },
   );
+  if (epoch !== worldEpoch) {
+    disposeTree(far.group);
+    return;
+  }
+  for (const m of far.materials) applyColony(m, colony);
+  far.group.name = "far-region";
+  farRegionGroup = far.group;
+  scene.add(far.group);
+
+  const [txf, tyf] = lngLatToTile(origin.lng, origin.lat, TILE_Z);
+  const region = await loadRegion(frame, TILE_Z, Math.floor(txf), Math.floor(tyf), TILE_RING, {
+    heightScale,
+    elevAt: terrain.sample,
+  });
   if (epoch !== worldEpoch) {
     disposeTree(region.group);
     return;
@@ -415,10 +449,16 @@ async function loadWorld(origin: LngLat, placeCarAt?: LngLat): Promise<void> {
 
   // ラベルは地面から少し浮かせる (建物や地形に埋もれないように)
   for (const l of region.labels) {
-    // 階層が上ほど高く浮かせて、建物越しでも読めるようにする
-    const lift =
-      l.kind === "poi" ? 20 : l.kind === "district" ? 60 : l.kind === "ward" ? 110 : 170;
-    l.y = elevSample(l.x, l.z) + lift;
+    // 階層が上ほど高く浮かせて、建物越しでも読めるようにする。
+    // 上げすぎると地平線より上 (夜空の中) に飛び出すので控えめに。
+    const LIFT: Record<string, number> = {
+      poi: 18,
+      road: 22,
+      district: 45,
+      ward: 85,
+      city: 130,
+    };
+    l.y = elevSample(l.x, l.z) + (LIFT[l.kind] ?? 30);
   }
   labels.setItems(region.labels);
   lastLabelItems = region.labels;

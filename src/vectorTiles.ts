@@ -119,15 +119,39 @@ async function fetchTile(z: number, x: number, y: number): Promise<VectorTile | 
  * 中心タイル周辺の (2*ring+1)^2 タイルを z で読み込み、
  * 建物(押し出し) / 道路 / 水域 / 地面 のメッシュを frame ローカル座標で構築する。
  */
+export interface RegionOptions {
+  heightScale?: number;
+  elevAt?: (x: number, z: number) => number;
+  /**
+   * この半径 (m) より内側のジオメトリを作らない。
+   * 遠景リングを低ズームで重ねるとき、近距離リングと二重描画して
+   * z ファイティングを起こすのを防ぐ。
+   */
+  skipInsideRadius?: number;
+  /** 建物を作らない (遠景リングでは不要 & 重い) */
+  noBuildings?: boolean;
+  /** ラベルを採らない (近距離リング側で採る) */
+  noLabels?: boolean;
+  /** 幅がこれ未満の道路は作らない (遠景リングは幹線のみ) */
+  minRoadWidth?: number;
+}
+
 export async function loadRegion(
   frame: LocalFrame,
   z: number,
   centerTileX: number,
   centerTileY: number,
   ring: number,
-  heightScale = 1,
-  elevAt: (x: number, z: number) => number = () => 0,
+  opts: RegionOptions = {},
 ): Promise<RegionMeshes> {
+  const {
+    heightScale = 1,
+    elevAt = () => 0,
+    skipInsideRadius = 0,
+    noBuildings = false,
+    noLabels = false,
+    minRoadWidth = 0,
+  } = opts;
   const group = new THREE.Group();
   group.name = "region";
 
@@ -192,7 +216,7 @@ export async function loadRegion(
           const ringDist = Math.max(Math.abs(dx), Math.abs(dy));
           const minBuildingArea = ringDist <= 1 ? 24 : 280;
 
-          const bl = tile.layers["building"];
+          const bl = noBuildings ? null : tile.layers["building"];
           if (bl) {
             for (let i = 0; i < bl.length; i++) {
               const feat = bl.feature(i);
@@ -230,6 +254,7 @@ export async function loadRegion(
                 waterPos,
                 waterIdx,
                 elevAt,
+                skipInsideRadius,
               );
             }
           }
@@ -239,11 +264,11 @@ export async function loadRegion(
             for (let i = 0; i < tl.length; i++) {
               const feat = tl.feature(i);
               const width = roadWidth(feat.properties["class"] as string);
-              if (width <= 0) continue;
+              if (width <= 0 || width < minRoadWidth) continue;
               // 車道 (歩道/桟橋を除く) のみスナップ対象にする
               const snappable = width >= 5;
               for (const line of feat.loadGeometry() as Pt[][]) {
-                ribbon(line, toLocal, width, 1.2, roadPos, roadIdx, elevAt);
+                ribbon(line, toLocal, width, 1.2, roadPos, roadIdx, elevAt, skipInsideRadius);
                 if (!snappable) continue;
                 for (const pt of line) {
                   const [lx, lz] = toLocal(pt.x, pt.y);
@@ -253,7 +278,7 @@ export async function loadRegion(
             }
           }
 
-          collectLabels(tile, toLocal, labels, seenLabels);
+          if (!noLabels) collectLabels(tile, toLocal, labels, seenLabels);
           chunks.push(chunk);
         })(),
       );
@@ -529,9 +554,21 @@ function flatPolygon(
   outPos: number[],
   outIdx: number[],
   elevAt: ElevFn,
+  skipInside = 0,
 ): void {
   for (const { flat, holeIdx } of buildFlatRings(rings, toLocal)) {
     if (flat.length < 6) continue;
+    if (skipInside > 0) {
+      // 重心が近距離リングの内側なら作らない (二重描画を避ける)
+      let cx = 0;
+      let cz = 0;
+      for (let i = 0; i < flat.length; i += 2) {
+        cx += flat[i];
+        cz += flat[i + 1];
+      }
+      const n = flat.length / 2;
+      if (Math.hypot(cx / n, cz / n) < skipInside) continue;
+    }
     const tris = earcut(flat, holeIdx.length ? holeIdx : undefined, 2);
     const base = outPos.length / 3;
     for (let i = 0; i < flat.length; i += 2) {
@@ -626,12 +663,15 @@ function ribbon(
   outPos: number[],
   outIdx: number[],
   elevAt: ElevFn,
+  skipInside = 0,
 ): void {
   const hw = width / 2;
   const pts = line.map((p) => toLocal(p.x, p.y));
   for (let i = 0; i < pts.length - 1; i++) {
     const [x1, z1] = pts[i];
     const [x2, z2] = pts[i + 1];
+    // 近距離リングと重なる範囲は作らない
+    if (skipInside > 0 && Math.hypot((x1 + x2) / 2, (z1 + z2) / 2) < skipInside) continue;
     const dx = x2 - x1;
     const dz = z2 - z1;
     const len = Math.hypot(dx, dz) || 1;

@@ -92,10 +92,10 @@ export class UI {
     this.settings.innerHTML = `
       <h4><span>コロニー調整</span><span class="toggle">＋</span></h4>
       <div class="settings-body">
-        <label>半径 R <span data-v="r">1100 m</span></label>
-        <input type="range" data-k="r" min="600" max="6000" step="50" value="1100" />
-        <label>曲げの強さ <span data-v="t">66°</span></label>
-        <input type="range" data-k="t" min="10" max="100" step="2" value="66" />
+        <label>半径 R <span data-v="r">1800 m</span></label>
+        <input type="range" data-k="r" min="600" max="8000" step="100" value="1800" />
+        <label>曲げの強さ <span data-v="t">80°</span></label>
+        <input type="range" data-k="t" min="10" max="88" step="2" value="80" />
         <label>建物高さ <span data-v="h">1.0×</span></label>
         <input type="range" data-k="h" min="0.5" max="3" step="0.25" value="1" />
         <label>走行速度 <span data-v="s">50 km/h</span></label>

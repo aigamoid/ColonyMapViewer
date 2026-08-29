@@ -27,10 +27,17 @@ export interface ColonyUniforms {
   /**
    * 巻き上げ角の上限 (rad)。
    * 純粋な円柱だと θ=s/R がどこまでも増え、遠方が頭上を越えて背後へ回り込んでしまう
-   * (「遠距離の目標を目視できる」という目的が達成できない)。
-   * そこで θ = θmax·tanh(s / (R·θmax)) と飽和させる。
-   * 近距離では θ ≈ s/R で円柱と一致し、遠距離は θmax に漸近して画面上端に積み上がる。
+   * (「遠距離の目標を目視できる」という目的が達成できない)。そこで上限を設けて
+   *
+   *   θ = θmax · s / (s + R·θmax)
+   *
+   * とする。近距離では θ ≈ s/R で円柱と一致し、遠方は θmax に漸近する。
    * 0 以下にすると飽和なし (真の円柱)。
+   *
+   * tanh ではなく有理関数なのが要点。tanh は指数的に飽和するため
+   * R=1100/θmax=66° では 5km と 20km の差が 0.05° しかなく、
+   * 遠景がすべて 1 ピクセルの帯に潰れて「遠くが見える」ようにならない。
+   * 有理関数なら同条件で 9.4° 開き、20km 先まで判別できる。
    *
    * θ が 90° を超えると建物の「上」方向が観測者を向き、遠景が
    * 屋根の並んだ一枚の壁に潰れて何も読み取れなくなる。
@@ -53,19 +60,21 @@ export function createColonyUniforms(radius = 1800, thetaMax = 1.15): ColonyUnif
 
 /** 前方距離 s -> 巻き上げ角 θ (CPU 側)。GLSL の colonyTheta と同じ式。 */
 export function colonyTheta(s: number, u: ColonyUniforms): number {
-  const lin = s / u.uColonyR.value;
+  const R = u.uColonyR.value;
   const tm = u.uThetaMax.value;
-  return tm <= 0 ? lin : tm * Math.tanh(lin / tm);
+  if (tm <= 0) return s / R;
+  const a = R * tm;
+  return (tm * s) / (Math.abs(s) + a);
 }
 
 /** θ -> 前方距離 s (逆変換)。画面ピックで使う。 */
 export function colonyThetaInverse(theta: number, u: ColonyUniforms): number {
-  const mix = u.uColonyMix.value || 1;
-  const t = theta / mix;
+  const R = u.uColonyR.value;
   const tm = u.uThetaMax.value;
-  if (tm <= 0) return t * u.uColonyR.value;
-  const y = Math.max(-0.999, Math.min(0.999, t / tm));
-  return u.uColonyR.value * tm * Math.atanh(y);
+  if (tm <= 0) return theta * R;
+  const a = R * tm;
+  const t = Math.max(-tm * 0.999, Math.min(tm * 0.999, theta));
+  return (a * t) / (tm - Math.abs(t));
 }
 
 /** forward(東,北) から axis を更新する (forward を +90° 回転) */
@@ -86,17 +95,14 @@ uniform vec2  uCarLocal;
 uniform float uCarElev;
 uniform float uThetaMax;
 
-// WebGL1 の GLSL ES 1.0 には tanh が無いので自前実装 (大きな |x| でも安定)
-float colonyTanh(float x) {
-  float e = exp(-2.0 * abs(x));
-  float t = (1.0 - e) / (1.0 + e);
-  return x < 0.0 ? -t : t;
-}
-
-// 前方距離 s -> 巻き上げ角 θ。θmax で飽和させ遠方が背後へ回り込むのを防ぐ。
+// 前方距離 s -> 巻き上げ角 θ。
+// θmax で頭打ちにして遠方が背後へ回り込むのを防ぎつつ、
+// 有理関数にすることで遠距離でも角度が開き続けるようにする
+// (tanh だと 5km 以遠が 1 本の線に潰れて 20km 先が判別できない)。
 float colonyTheta(float s) {
-  float lin = s / uColonyR;
-  return uThetaMax <= 0.0 ? lin : uThetaMax * colonyTanh(lin / uThetaMax);
+  if (uThetaMax <= 0.0) return s / uColonyR;
+  float a = uColonyR * uThetaMax;
+  return uThetaMax * s / (abs(s) + a);
 }
 
 vec3 colonyWarpPos(vec3 p) {
