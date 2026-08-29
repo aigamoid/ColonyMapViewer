@@ -118,6 +118,11 @@ let routeLocal: { x: number; z: number }[] = [];
 let stepIdx = 0;
 let navigating = false;
 
+// 現在地表示 (逆ジオコーディング) の状態
+let areaFetchAt = 0;
+let areaFetchFrom: { x: number; z: number } | null = null;
+let areaParts: string[] = [];
+
 /** コロニー曲面を可視化する参照グリッド (200m 間隔・控えめ) */
 function addColonyGrid(): void {
   const ext = 1600;
@@ -340,6 +345,9 @@ function disposeTree(obj: THREE.Object3D): void {
 
 function clearWorld(): void {
   labels.clear();
+  // 世界を貼り直したら現在地表示もすぐ取り直す (10秒の間引きを待たない)
+  areaFetchAt = 0;
+  areaFetchFrom = null;
   for (const o of [regionGroup, terrainMesh, gridMesh]) {
     if (!o) continue;
     scene.remove(o);
@@ -403,6 +411,7 @@ async function loadWorld(origin: LngLat, placeCarAt?: LngLat): Promise<void> {
   regionGroup = region.group;
   scene.add(region.group);
   snapCarToRoad(region.roadCenters);
+  restoreRouteAfterReload();
 
   // ラベルは地面から少し浮かせる (建物や地形に埋もれないように)
   for (const l of region.labels) {
@@ -452,6 +461,37 @@ function ensureWorldCovers(ll: LngLat): boolean {
   // 新しい原点 = 現在地。自車もそこへ移す (元の緯度経度に取り残さない)
   loadWorld(ll, ll);
   return true;
+}
+
+/**
+ * 走行して読み込み済み範囲の縁に近づいたら、自車を中心に世界を貼り直す。
+ * (タイル単位の増分ストリーミングではなく丸ごと読み直す簡易版)
+ * ルートと案内状態は緯度経度で保持しているので貼り直し後に復元できる。
+ */
+let streamPending = false;
+function streamWorldIfNeeded(): void {
+  if (streamPending || !regionGroup) return;
+  if (Math.hypot(car.x, car.z) < WORLD_RADIUS * 0.8) return;
+  streamPending = true;
+  const at = car.lngLat;
+  ui.toast("先の地図を読み込み中…");
+  loadWorld(at, at).finally(() => {
+    streamPending = false;
+  });
+}
+
+/** 世界を貼り直したあとにルート・目的地・自動走行を復元する */
+function restoreRouteAfterReload(): void {
+  if (!destLngLat) return;
+  const d = frame.toLocal(destLngLat);
+  if (destPin) scene.remove(destPin);
+  destPin = makePin(d.x, d.z);
+  scene.add(destPin);
+
+  if (!currentRoute) return;
+  routeLocal = currentRoute.coords.map((c) => frame.toLocal(c));
+  drawRouteLine();
+  if (navigating) car.startAutopilot(currentRoute.coords, true);
 }
 
 async function setDestination(ll: LngLat, label: string): Promise<void> {
@@ -753,9 +793,6 @@ if (debugEnabled) {
  * HUD に固定で出す。
  */
 let statusTimer = 0;
-let areaFetchAt = 0;
-let areaFetchFrom: { x: number; z: number } | null = null;
-let areaParts: string[] = [];
 
 /** ラベル点の最近傍から住所を推定する (逆ジオコーディングが使えないときの控え) */
 function guessAreaFromLabels(): string[] {
@@ -814,6 +851,7 @@ function tick(): void {
   colony.uCarLocal.value.set(car.x, car.z);
   colony.uCarElev.value = car.elev;
   updateForward(dtView);
+  streamWorldIfNeeded();
   updateNav();
 
   carMesh.position.set(0, 0, 0);

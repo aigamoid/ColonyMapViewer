@@ -123,17 +123,38 @@ export class Car {
     this.accuracy = null;
   }
 
-  /** ルート座標列に沿って自動走行を開始 */
-  startAutopilot(coords: LngLat[]): void {
+  /**
+   * ルート座標列に沿って自動走行を開始する。
+   * `resume` を立てると自車位置は動かさず、経路上の最寄り地点から続行する
+   * (走行中に世界を貼り直したときに先頭へ引き戻さないため)。
+   */
+  startAutopilot(coords: LngLat[], resume = false): void {
     this.stopGps();
     this.path = coords.map((c) => this.frame.toLocal(c));
-    this.pathI = 0;
-    if (this.path.length) {
+    if (!this.path.length) return;
+    if (resume) {
+      this.pathI = this.nearestPathIndex();
+    } else {
+      this.pathI = 0;
       this.x = this.path[0].x;
       this.z = this.path[0].z;
     }
     this.mode = "autopilot";
     this.speed = this.demoSpeed;
+  }
+
+  /** 経路上で自車に最も近い区間の始点インデックス */
+  private nearestPathIndex(): number {
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < this.path.length; i++) {
+      const d = (this.path[i].x - this.x) ** 2 + (this.path[i].z - this.z) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    return best;
   }
 
   stop(): void {

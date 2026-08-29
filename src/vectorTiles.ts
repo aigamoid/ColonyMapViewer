@@ -187,6 +187,11 @@ export async function loadRegion(
             return [(mx - originMx) * scale, (my - originMy) * scale];
           };
 
+          // 自車から遠いタイルは小さな建物を落とす (簡易 LOD)。
+          // 住宅地は 1 タイルに数万棟あり、そのまま積むと頂点数が跳ね上がる。
+          const ringDist = Math.max(Math.abs(dx), Math.abs(dy));
+          const minBuildingArea = ringDist <= 1 ? 24 : 280;
+
           const bl = tile.layers["building"];
           if (bl) {
             for (let i = 0; i < bl.length; i++) {
@@ -209,6 +214,7 @@ export async function loadRegion(
                 buildingBase,
                 elevAt,
                 seenBuildings,
+                minBuildingArea,
               );
             }
           }
@@ -544,6 +550,7 @@ function extrudePolygon(
   outBase: number[],
   elevAt: ElevFn,
   seen: Set<string>,
+  minArea: number,
 ): void {
   for (const { flat, holeIdx, local, outerLen } of buildFlatRings(rings, toLocal)) {
     if (local.length < 3) continue;
@@ -553,7 +560,7 @@ function extrudePolygon(
       area2 += local[j][0] * local[i][1] - local[i][0] * local[j][1];
     }
     const area = Math.abs(area2) / 2;
-    if (area < 24 || area > 9000) continue;
+    if (area < minArea || area > 9000) continue;
     // 外周が大きく広がるポリゴン (巻き方向誤判定 / 巨大複合体) を除外
     let minLx = Infinity;
     let maxLx = -Infinity;
