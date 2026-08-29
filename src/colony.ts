@@ -171,22 +171,27 @@ export function applyColony(
     shader.uniforms.uCarElev = u.uCarElev;
     shader.uniforms.uThetaMax = u.uThetaMax;
 
-    // 遠方の建物を平たくするための頂点前処理
+    // 遠方の建物を平たくするための頂点前処理。
+    // ついでに「その建物の高さ」を varying で渡し、色に段差を付けて
+    // 一様な灰色の塊に見えないようにする。
     const adjust = heightFalloff
       ? `
   vec3 colonyPos = position.xyz;
+  float bldgH = 0.0;
   {
     float relH = colonyPos.y - aBaseY;
+    bldgH = relH;
     float d = length(colonyPos.xz - uCarLocal);
     colonyPos.y = aBaseY + relH * mix(1.0, 0.14, smoothstep(70.0, 420.0, d));
-  }`
+  }
+  vBldgH = bldgH;`
       : `  vec3 colonyPos = position.xyz;`;
 
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
         `#include <common>\n${GLSL_WARP}\nvarying float vCamDist;${
-          heightFalloff ? "\nattribute float aBaseY;" : ""
+          heightFalloff ? "\nattribute float aBaseY;\nvarying float vBldgH;" : ""
         }`,
       )
       .replace(
@@ -213,7 +218,19 @@ export function applyColony(
       // 街全体が半透明スラブの重なり (灰色の霞) になってしまう。
       // 代わりにスクリーン空間ディザで discard する (マテリアルは不透明のまま)。
       shader.fragmentShader = shader.fragmentShader
-        .replace("#include <common>", "#include <common>\nvarying float vCamDist;")
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying float vCamDist;\nvarying float vBldgH;",
+        )
+        .replace(
+          "#include <dithering_fragment>",
+          `#include <dithering_fragment>
+  {
+    // 低層はやや暗く沈ませ、高層はわずかに明るくして街の起伏を読めるようにする
+    float lv = smoothstep(6.0, 90.0, vBldgH);
+    gl_FragColor.rgb *= mix(0.78, 1.1, lv);
+  }`,
+        )
         .replace(
           "#include <clipping_planes_fragment>",
           `#include <clipping_planes_fragment>
