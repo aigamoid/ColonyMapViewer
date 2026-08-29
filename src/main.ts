@@ -457,6 +457,7 @@ function ensureWorldCovers(ll: LngLat): boolean {
 async function setDestination(ll: LngLat, label: string): Promise<void> {
   destLngLat = ll;
   const d = frame.toLocal(ll);
+  const destDist = Math.hypot(d.x - car.x, d.z - car.z);
   if (destPin) scene.remove(destPin);
   destPin = makePin(d.x, d.z);
   scene.add(destPin);
@@ -475,12 +476,23 @@ async function setDestination(ll: LngLat, label: string): Promise<void> {
   stepIdx = 0;
   drawRouteLine();
   ui.showRoutePreview(fmtDistance(r.distance), fmtDuration(r.duration));
+
+  // 読み込み済みは自車周辺のみ。範囲外はビル・地形が無く線だけが伸びるので断っておく
+  if (destDist > WORLD_RADIUS) {
+    ui.toast(
+      `目的地は読み込み済みの範囲外です (約 ${fmtDistance(destDist)} 先)。周辺の地図は表示されません`,
+    );
+  }
 }
 
 function drawRouteLine(): void {
   if (routeLine) scene.remove(routeLine);
   // 幅を持つリボンとして構築 (LineBasicMaterial は線幅 1px 固定で見えないため)
   const half = 7;
+  // 地形は自車周辺しか読み込んでいない。範囲外で elevSample が 0 を返すと
+  // ルート線だけが地面より下へ潜ってしまうので、自車の標高で代用する。
+  const routeElev = (x: number, z: number): number =>
+    Math.hypot(x - car.x, z - car.z) > WORLD_RADIUS ? car.elev : elevSample(x, z);
   const pos: number[] = [];
   const idx: number[] = [];
   for (let i = 0; i < routeLocal.length - 1; i++) {
@@ -491,8 +503,8 @@ function drawRouteLine(): void {
     const len = Math.hypot(dx, dz) || 1;
     const nx = (-dz / len) * half;
     const nz = (dx / len) * half;
-    const ya = elevSample(a.x, a.z) + 3.5;
-    const yb = elevSample(b.x, b.z) + 3.5;
+    const ya = routeElev(a.x, a.z) + 3.5;
+    const yb = routeElev(b.x, b.z) + 3.5;
     const base = pos.length / 3;
     pos.push(
       a.x + nx, ya, a.z + nz,
